@@ -538,3 +538,4 @@ build/SkyrimNetPrismaDashboard.exp
 build/SkyrimNetPrismaDashboard.lib
 setup.ps1
 SKSE/Plugins/SkyrimNetPrismaDashboard.dll
+external/CommonLibSSE-NG/
