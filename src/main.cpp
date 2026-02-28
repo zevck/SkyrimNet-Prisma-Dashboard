@@ -76,7 +76,7 @@ static void OnDomReady(PrismaView view)
         (function() {
             (function() {
                 function applyWindow() {
-                    // Wrap all body children in a fixed-size centered window div
+                    // Outer window — flex column so topbar + content stack vertically
                     var win = document.createElement('div');
                     win.id = 'snpd-window';
                     win.style.cssText = [
@@ -88,17 +88,81 @@ static void OnDomReady(PrismaView view)
                         'max-width:95vw',
                         'height:1200px',
                         'max-height:95vh',
-                        'overflow:auto',
+                        'display:flex',
+                        'flex-direction:column',
                         'background:#111827',
                         'border:2px solid #444',
                         'border-radius:8px',
                         'box-shadow:0 0 30px rgba(0,0,0,0.8)',
                         'z-index:99999'
                     ].join(';');
+
+                    // Topbar
+                    var bar = document.createElement('div');
+                    bar.style.cssText = [
+                        'display:flex',
+                        'align-items:center',
+                        'justify-content:space-between',
+                        'padding:0 12px',
+                        'height:36px',
+                        'min-height:36px',
+                        'background:#1f2937',
+                        'border-bottom:1px solid #374151',
+                        'border-radius:6px 6px 0 0',
+                        'cursor:move',
+                        'user-select:none',
+                        '-webkit-user-select:none'
+                    ].join(';');
+
+                    var title = document.createElement('span');
+                    title.textContent = 'SkyrimNet';
+                    title.style.cssText = 'color:#9ca3af;font-size:13px;font-family:ui-sans-serif,system-ui,sans-serif;font-weight:500;letter-spacing:0.05em;pointer-events:none;';
+
+                    var closeBtn = document.createElement('button');
+                    closeBtn.textContent = '\u00d7';
+                    closeBtn.style.cssText = 'background:none;border:none;color:#6b7280;font-size:20px;line-height:1;cursor:pointer;padding:0;width:24px;height:24px;border-radius:4px;display:flex;align-items:center;justify-content:center;';
+                    closeBtn.addEventListener('mouseover', function() { this.style.background='#374151'; this.style.color='#f9fafb'; });
+                    closeBtn.addEventListener('mouseout',  function() { this.style.background='none';    this.style.color='#6b7280'; });
+                    closeBtn.addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        try { if (typeof window.closeDashboard === 'function') window.closeDashboard(''); } catch(_) {}
+                    });
+
+                    bar.appendChild(title);
+                    bar.appendChild(closeBtn);
+
+                    // Scrollable content area — flex:1 so it fills remaining height
+                    var content = document.createElement('div');
+                    content.style.cssText = 'flex:1;overflow:auto;min-height:0;border-radius:0 0 6px 6px;';
+
+                    // Move all existing body children into content
                     while (document.body.firstChild) {
-                        win.appendChild(document.body.firstChild);
+                        content.appendChild(document.body.firstChild);
                     }
+
+                    win.appendChild(bar);
+                    win.appendChild(content);
                     document.body.appendChild(win);
+
+                    // Drag logic — switches from transform centering to explicit px on first drag
+                    var dragging = false, ox = 0, oy = 0;
+                    bar.addEventListener('mousedown', function(e) {
+                        if (e.target === closeBtn || e.button !== 0) return;
+                        var r = win.getBoundingClientRect();
+                        win.style.transform = 'none';
+                        win.style.top  = r.top  + 'px';
+                        win.style.left = r.left + 'px';
+                        ox = e.clientX - r.left;
+                        oy = e.clientY - r.top;
+                        dragging = true;
+                        e.preventDefault();
+                    });
+                    document.addEventListener('mousemove', function(e) {
+                        if (!dragging) return;
+                        win.style.left = (e.clientX - ox) + 'px';
+                        win.style.top  = (e.clientY - oy) + 'px';
+                    });
+                    document.addEventListener('mouseup', function() { dragging = false; });
                 }
 
                 if (document.body) {
