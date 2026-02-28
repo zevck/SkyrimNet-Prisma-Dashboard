@@ -74,6 +74,40 @@ static void OnDomReady(PrismaView view)
 {
     s_PrismaUI->Invoke(view, R"js(
         (function() {
+            (function() {
+                function applyWindow() {
+                    // Wrap all body children in a fixed-size centered window div
+                    var win = document.createElement('div');
+                    win.id = 'snpd-window';
+                    win.style.cssText = [
+                        'position:fixed',
+                        'top:50%',
+                        'left:50%',
+                        'transform:translate(-50%,-50%)',
+                        'width:2000px',
+                        'max-width:95vw',
+                        'height:1200px',
+                        'max-height:95vh',
+                        'overflow:auto',
+                        'background:#111827',
+                        'border:2px solid #444',
+                        'border-radius:8px',
+                        'box-shadow:0 0 30px rgba(0,0,0,0.8)',
+                        'z-index:99999'
+                    ].join(';');
+                    while (document.body.firstChild) {
+                        win.appendChild(document.body.firstChild);
+                    }
+                    document.body.appendChild(win);
+                }
+
+                if (document.body) {
+                    applyWindow();
+                } else {
+                    document.addEventListener('DOMContentLoaded', applyWindow);
+                }
+            })();
+
             // window.open / target=_blank → in-page navigation
             window.open = function(url) {
                 if (url) window.location.href = url;
