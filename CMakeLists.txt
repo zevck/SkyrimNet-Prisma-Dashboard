@@ -47,6 +47,8 @@ target_link_libraries(
     ${PROJECT_NAME}
     PRIVATE
         CommonLibSSE::CommonLibSSE
+        ws2_32
+        winmm
 )
 
 # ---- Installation ----

@@ -539,3 +539,7 @@ build/SkyrimNetPrismaDashboard.lib
 setup.ps1
 SKSE/Plugins/SkyrimNetPrismaDashboard.dll
 external/CommonLibSSE-NG/
+build/dobuild.bat
+.resources/PrismaUI-SkyrimNet-Plugin/
+NAVIGATION_FLASH_RESEARCH.md
+SkyrimNet Prisma Dashboard.code-workspace

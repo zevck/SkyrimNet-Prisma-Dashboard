@@ -8,8 +8,13 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <mmsystem.h>
 #pragma warning(pop)
 
 using namespace std::literals;
