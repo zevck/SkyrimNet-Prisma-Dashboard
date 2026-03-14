@@ -695,9 +695,12 @@ static std::string PatchBundle(std::string body)
     // Patch: use a module-scoped timer variable (_snpdCmTmr) for a 600ms debounce.
     static const std::string needle =
         "e.docChanged){const t=e.state.doc.toString();setTimeout(()=>b(t),0)}";
+    // Move doc.toString() inside the timer so it only fires once per typing burst,
+    // not on every keystroke — avoids allocating a full doc string copy each keypress
+    // and removes the GC pressure that causes the periodic "every so often" stutter.
     static const std::string replacement =
-        "e.docChanged){const t=e.state.doc.toString();"
-        "clearTimeout(self._snpdCmTmr);self._snpdCmTmr=setTimeout(()=>b(t),600)}";
+        "e.docChanged){const _ss=e.state;"
+        "clearTimeout(self._snpdCmTmr);self._snpdCmTmr=setTimeout(()=>b(_ss.doc.toString()),600)}";
     auto pos = body.find(needle);
     if (pos != std::string::npos) {
         body.replace(pos, needle.size(), replacement);
