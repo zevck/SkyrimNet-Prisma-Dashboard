@@ -686,6 +686,26 @@ static std::string InjectPatches(std::string body)
     return body;
 }
 
+// Patches the React app JS bundle before serving it.
+// Currently: debounces the CodeMirror onChange -> validation call from 0ms to 600ms
+// so syntax validation doesn't run on every keystroke, eliminating typing lag.
+static std::string PatchBundle(std::string body)
+{
+    // CodeMirror updateListener fires onChange(text) every keystroke via setTimeout(fn,0).
+    // Patch: use a module-scoped timer variable (_snpdCmTmr) for a 600ms debounce.
+    static const std::string needle =
+        "e.docChanged){const t=e.state.doc.toString();setTimeout(()=>b(t),0)}";
+    static const std::string replacement =
+        "e.docChanged){const t=e.state.doc.toString();"
+        "clearTimeout(self._snpdCmTmr);self._snpdCmTmr=setTimeout(()=>b(t),600)}";
+    auto pos = body.find(needle);
+    if (pos != std::string::npos) {
+        body.replace(pos, needle.size(), replacement);
+        logger::info("SkyrimNetDashboard: PatchBundle: CodeMirror debounce applied");
+    }
+    return body;
+}
+
 // Fetches the SkyrimNet root HTML and injects compat patches.
 static std::string FetchAndInject(const std::string& host, uint16_t port)
 {
@@ -834,6 +854,8 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 contentType = std::move(resCt);
                 if (contentType.find("text/html") != std::string::npos && !body.empty())
                     body = InjectPatches(std::move(body));
+                else if (contentType.find("javascript") != std::string::npos && !body.empty())
+                    body = PatchBundle(std::move(body));
             }
 
             std::string resp =
