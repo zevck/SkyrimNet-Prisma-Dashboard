@@ -1023,6 +1023,39 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
     return {body, ct, statusCode};
 }
 
+// ── Win32 clipboard helpers ──────────────────────────────────────────────────
+static std::string GetClipboardTextW32()
+{
+    if (!OpenClipboard(nullptr)) return "";
+    HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+    if (!hData) { CloseClipboard(); return ""; }
+    auto* pWide = static_cast<wchar_t*>(GlobalLock(hData));
+    std::string result;
+    if (pWide) {
+        int sz = WideCharToMultiByte(CP_UTF8, 0, pWide, -1, nullptr, 0, nullptr, nullptr);
+        if (sz > 1) { result.resize(sz - 1); WideCharToMultiByte(CP_UTF8, 0, pWide, -1, result.data(), sz, nullptr, nullptr); }
+        GlobalUnlock(hData);
+    }
+    CloseClipboard();
+    return result;
+}
+
+static void SetClipboardTextW32(const std::string& text)
+{
+    int sz = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+    if (sz <= 0) return;
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, static_cast<SIZE_T>(sz) * sizeof(wchar_t));
+    if (!hMem) return;
+    auto* pWide = static_cast<wchar_t*>(GlobalLock(hMem));
+    if (!pWide) { GlobalFree(hMem); return; }
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, pWide, sz);
+    GlobalUnlock(hMem);
+    if (!OpenClipboard(nullptr)) { GlobalFree(hMem); return; }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, hMem)) GlobalFree(hMem); // OS owns hMem on success
+    CloseClipboard();
+}
+
 // Injects compat patches (confirm/alert/prompt/open) and a fast-typing
 // newline guard into an HTML document string.
 static std::string InjectPatches(std::string body)
@@ -1040,6 +1073,9 @@ static std::string InjectPatches(std::string body)
         ".cm-editor,.cm-content,.cm-line{"
         "-webkit-user-select:text!important;user-select:text!important;"
         "cursor:text!important;}\n"
+        // Enable text selection in all standard inputs and textareas.
+        "input,textarea,[contenteditable]{"
+        "-webkit-user-select:text!important;user-select:text!important;}\n"
         // Make CM6's custom selection-background divs visible even if the
         // engine doesn't render ::selection pseudo-elements.
         ".cm-selectionBackground{"
@@ -1134,6 +1170,145 @@ static std::string InjectPatches(std::string body)
         "}"
         "document.addEventListener('mousemove',_onDragMove,{capture:true,passive:true});"
         "document.addEventListener('pointermove',_onDragMove,{capture:true,passive:true});"
+        "})();\n"
+        // ── input/textarea drag-selection relay ───────────────────────────────
+        // Ultralight suppresses mousemove while a mouse button is held, so
+        // native drag-to-select inside <input> and <textarea> doesn't work.
+        // We relay moves as synthesized shift+click events which the browser
+        // interprets as 'extend selection to here'.
+        "(function(){"
+        "var _iEl=null,_iDown=false,_iAnchor=-1,_iSX=0,_iSY=0,_iStarted=false,_iLast=0,_iCvs=null;"
+        "document.addEventListener('pointerdown',function(e){"
+        "if(e.button!==0||e.shiftKey)return;"
+        "var t=e.target;"
+        "if(t.tagName!=='INPUT'&&t.tagName!=='TEXTAREA')return;"
+        "_iEl=t;_iDown=true;_iStarted=false;_iSX=e.clientX;_iSY=e.clientY;"
+        "_iAnchor=t.selectionStart!==undefined?t.selectionStart:0;"
+        "try{t.setPointerCapture(e.pointerId);}catch(_){}"
+        "},true);"
+        "document.addEventListener('mousedown',function(e){"
+        "if(e.button!==0||e.shiftKey||_iEl)return;"
+        "var t=e.target;"
+        "if(t.tagName!=='INPUT'&&t.tagName!=='TEXTAREA')return;"
+        "_iEl=t;_iDown=true;_iStarted=false;_iSX=e.clientX;_iSY=e.clientY;"
+        "_iAnchor=t.selectionStart!==undefined?t.selectionStart:0;"
+        "},true);"
+        "var _iClear=function(){_iDown=false;_iEl=null;_iAnchor=-1;_iStarted=false;};"
+        "document.addEventListener('mouseup',_iClear,true);"
+        "document.addEventListener('pointerup',_iClear,true);"
+        "document.addEventListener('pointercancel',_iClear,true);"
+        "function _iMove(e){"
+        "if(!_iEl||!_iDown)return;"
+        "if(!_iStarted){"
+        "var dx=e.clientX-_iSX,dy=e.clientY-_iSY;"
+        "if(dx*dx+dy*dy<16)return;"
+        "_iStarted=true;}"
+        "var n=Date.now();if(n-_iLast<16)return;_iLast=n;"
+        // Canvas-based char-position measurement — accurate for proportional fonts,
+        // padded inputs, and horizontally scrolled fields.  caretRangeFromPoint is
+        // not used here because it cannot reach inside form-control shadow DOM.
+        "var t=_iEl;"
+        "if(!_iCvs)_iCvs=document.createElement('canvas');"
+        "var pos=-1;"
+        "{var r=t.getBoundingClientRect();"
+        "var cs=window.getComputedStyle(t);"
+        "var pl=parseFloat(cs.paddingLeft)||0;"
+        "var fn=cs.font||(cs.fontSize+' '+cs.fontFamily);"
+        "var ctx=_iCvs.getContext('2d');ctx.font=fn;"
+        "var val=t.value||'';"
+        "if(t.tagName==='TEXTAREA'){"
+        "var pt=parseFloat(cs.paddingTop)||0;"
+        "var lh=parseFloat(cs.lineHeight);if(!lh||lh<=0)lh=parseFloat(cs.fontSize)*1.2||16;"
+        "var ty=e.clientY-r.top-pt+(t.scrollTop||0);"
+        "var li=Math.max(0,Math.floor(ty/lh));"
+        "var lns=val.split('\\n');li=Math.min(li,lns.length-1);"
+        "var ls=0;for(var j=0;j<li;j++)ls+=lns[j].length+1;"
+        "var line=lns[li]||'';"
+        "var tx=e.clientX-r.left-pl+(t.scrollLeft||0);"
+        "var _blo=0,_bhi=line.length,_bbest=0;"
+        "while(_blo<=_bhi){var _bm=(_blo+_bhi)>>1;"
+        "if(ctx.measureText(line.slice(0,_bm)).width<=tx){_bbest=_bm;_blo=_bm+1;}else _bhi=_bm-1;}"
+        "pos=ls+_bbest;"
+        "}else{"
+        "var tx=e.clientX-r.left-pl+(t.scrollLeft||0);"
+        "var _blo=0,_bhi=val.length,_bbest=0;"
+        "while(_blo<=_bhi){var _bm=(_blo+_bhi)>>1;"
+        "if(ctx.measureText(val.slice(0,_bm)).width<=tx){_bbest=_bm;_blo=_bm+1;}else _bhi=_bm-1;}"
+        "pos=_bbest;"
+        "}}"
+        "if(pos<0)return;"
+        "var anch=_iAnchor>=0?_iAnchor:0;"
+        "var lo=Math.min(anch,pos),hi=Math.max(anch,pos);"
+        "try{t.setSelectionRange(lo,hi,pos<anch?'backward':'forward');}catch(_){}"
+        "}"
+        "document.addEventListener('mousemove',_iMove,{capture:true,passive:true});"
+        "document.addEventListener('pointermove',_iMove,{capture:true,passive:true});"
+        "})();\n"
+        // ── Clipboard bridge functions (invoked by C++ GetAsyncKeyState poller) ─
+        // __snpdCopy() — returns selection text from the focused element.
+        // __snpdCut()  — same but also deletes the selection; returns the text.
+        // __snpdPaste(txt) — inserts text at cursor with React-safe prototype setter.
+        // No JS keyboard events or sync XHR involved; all Ctrl detection is in C++.
+        "window.__snpdCopy=function(){"
+        "var t=document.activeElement,s='';"
+        "if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA')){"
+        "s=t.value.slice(t.selectionStart,t.selectionEnd);"
+        "}else if(window.getSelection){s=window.getSelection().toString();}"
+        "return s;};\n"
+        "window.__snpdCut=function(){"
+        "var t=document.activeElement,s='';"
+        "if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA')){"
+        "var ss=t.selectionStart,se=t.selectionEnd;"
+        "s=t.value.slice(ss,se);"
+        "if(s){"
+        "var P=t.tagName==='INPUT'?HTMLInputElement.prototype:HTMLTextAreaElement.prototype;"
+        "var d=Object.getOwnPropertyDescriptor(P,'value');"
+        "var nv=t.value.slice(0,ss)+t.value.slice(se);"
+        "if(d&&d.set)d.set.call(t,nv);else t.value=nv;"
+        "t.selectionStart=t.selectionEnd=ss;"
+        "try{t.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteByCut'}));}catch(_x){t.dispatchEvent(new Event('input',{bubbles:true}));}"
+        "t.dispatchEvent(new Event('change',{bubbles:true}));}"
+        "}else if(window.getSelection){"
+        "s=window.getSelection().toString();"
+        "try{document.execCommand('delete');}catch(_x){}}"
+        "return s;};\n"
+        "window.__snpdPaste=function(txt){"
+        "if(!txt)return;"
+        "var el=document.activeElement;"
+        "if(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA')){"
+        "var P=el.tagName==='INPUT'?HTMLInputElement.prototype:HTMLTextAreaElement.prototype;"
+        "var d=Object.getOwnPropertyDescriptor(P,'value');"
+        "var ss=el.selectionStart,se=el.selectionEnd,sv=el.value;"
+        "var nv=sv.slice(0,ss)+txt+sv.slice(se);"
+        "if(d&&d.set)d.set.call(el,nv);else el.value=nv;"
+        "el.selectionStart=el.selectionEnd=ss+txt.length;"
+        "try{el.dispatchEvent(new InputEvent('input',{bubbles:true,data:txt,inputType:'insertText'}));}catch(_x){el.dispatchEvent(new Event('input',{bubbles:true}));}"
+        "el.dispatchEvent(new Event('change',{bubbles:true}));"
+        "}else{try{document.execCommand('insertText',false,txt);}catch(_x){}}};\n"
+        // Swallow Ctrl+C/X/V keydowns so Ultralight doesn't play its native ding.
+        // The C++ GetAsyncKeyState poller handles the actual clipboard work independently.
+        "(function(){"
+        "document.addEventListener('keydown',function(e){"
+        "var kc=e.keyCode||e.which||0,k=e.key?e.key.toLowerCase():'';"
+        "if(!e.ctrlKey&&!e.metaKey)return;"
+        "if(kc===67||k==='c'||kc===86||k==='v'||kc===88||k==='x'){"
+        "e.preventDefault();e.stopPropagation();}},true);"
+        "})();\n"
+        // DOM copy/paste events for context-menu clipboard (async fetch, no sync XHR)
+        "(function(){"
+        "document.addEventListener('copy',function(e){e.preventDefault();"
+        "var s=window.__snpdCopy?window.__snpdCopy():'';"
+        "if(s)fetch('/clipboard-set',{method:'POST',headers:{'Content-Type':'text/plain; charset=utf-8'},body:s}).catch(function(){});},true);"
+        "document.addEventListener('paste',function(e){e.preventDefault();"
+        "var cd=e.clipboardData&&e.clipboardData.getData?e.clipboardData.getData('text/plain'):'';"
+        "if(cd){if(window.__snpdPaste)window.__snpdPaste(cd);}"
+        "else{fetch('/clipboard-get').then(function(r){return r.text();}).then(function(t){if(t&&window.__snpdPaste)window.__snpdPaste(t);}).catch(function(){});}"
+        "},true);"
+        // navigator.clipboard async polyfill for apps that call it directly
+        "try{Object.defineProperty(navigator,'clipboard',{configurable:true,value:{"
+        "writeText:function(t){return fetch('/clipboard-set',{method:'POST',headers:{'Content-Type':'text/plain; charset=utf-8'},body:t||''}).then(function(){});},"
+        "readText:function(){return fetch('/clipboard-get').then(function(r){return r.text();});}"
+        "}});}catch(_x){}"
         "})();\n"
         // ── Dialog / nav compat ───────────────────────────────────────────────
         "window.confirm=function(){return true;};\n"
@@ -1699,6 +1874,16 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     logger::warn("SkyrimNetDashboard: /save-file failed to write '{}'", savePath);
                 }
                 contentType = "application/json";
+            } else if (path == "/clipboard-get") {
+                body        = GetClipboardTextW32();
+                contentType = "text/plain; charset=utf-8";
+            } else if (path == "/clipboard-set") {
+                SetClipboardTextW32(reqBody);
+                body        = "ok";
+                contentType = "text/plain";
+            } else if (path == "/is-ctrl-held") {
+                body        = ((GetKeyState(VK_CONTROL) & 0x8000) != 0) ? "1" : "0";
+                contentType = "text/plain";
             } else if (path == "/settings-get") {
                 body        = SettingsToJson();
                 contentType = "application/json";
@@ -1847,6 +2032,86 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
     return port;
 }
 
+// ── C++ clipboard helpers ─────────────────────────────────────────────────────
+// Called by the monitor thread when the Invoke result arrives with copied text.
+static void OnCopyResult(const char* result)
+{
+    if (result && *result) SetClipboardTextW32(result);
+}
+
+// Produces a JS double-quoted string literal from arbitrary UTF-8 text.
+static std::string EscapeJsStr(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size() + 2);
+    out += '"';
+    for (unsigned char c : s) {
+        if      (c == '"')  out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else if (c < 0x20)  { char h[8]; snprintf(h, sizeof(h), "\\u%04X", c); out += h; }
+        else                out += static_cast<char>(c);
+    }
+    out += '"';
+    return out;
+}
+
+// Polls GetAsyncKeyState every ~16ms; when the dashboard is focused and the user
+// presses Ctrl+C/V, drives clipboard operations via s_PrismaUI->Invoke().
+// This bypasses ALL Ultralight JS event quirks (no e.ctrlKey, no sync XHR needed).
+// The Invoke script reaches into the iframe via document.getElementById('snpd-frame')
+// and calls the __snpdCopy/__snpdPaste functions injected by InjectPatches.
+static void StartClipboardMonitor()
+{
+    std::thread([]() {
+        bool prevC = false, prevV = false, prevX = false;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            if (!s_PrismaUI || !s_View) { prevC = prevV = prevX = false; continue; }
+            if (!s_PrismaUI->HasFocus(s_View)) { prevC = prevV = prevX = false; continue; }
+            bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            bool curC  = (GetAsyncKeyState('C') & 0x8000) != 0;
+            bool curV  = (GetAsyncKeyState('V') & 0x8000) != 0;
+            bool curX  = (GetAsyncKeyState('X') & 0x8000) != 0;
+            if (ctrl) {
+                if (curC && !prevC) {
+                    // Copy: invoke __snpdCopy in the iframe, write result to Win32 clipboard
+                    s_PrismaUI->Invoke(s_View,
+                        "(function(){"
+                        "var f=document.getElementById('snpd-frame');"
+                        "var cw=f&&f.contentWindow;"
+                        "return cw&&cw.__snpdCopy?cw.__snpdCopy():'';}) ()",
+                        OnCopyResult);
+                }
+                if (curX && !prevX) {
+                    // Cut: __snpdCut deletes the selection and returns the text
+                    s_PrismaUI->Invoke(s_View,
+                        "(function(){"
+                        "var f=document.getElementById('snpd-frame');"
+                        "var cw=f&&f.contentWindow;"
+                        "return cw&&cw.__snpdCut?cw.__snpdCut():'';}) ()",
+                        OnCopyResult);
+                }
+                if (curV && !prevV) {
+                    // Paste: read Win32 clipboard and inject via __snpdPaste in the iframe
+                    std::string txt = GetClipboardTextW32();
+                    if (!txt.empty()) {
+                        std::string script =
+                            "(function(){"
+                            "var f=document.getElementById('snpd-frame');"
+                            "var cw=f&&f.contentWindow;"
+                            "if(cw&&cw.__snpdPaste)cw.__snpdPaste(" + EscapeJsStr(txt) + ");}) ()";
+                        s_PrismaUI->Invoke(s_View, script.c_str(), nullptr);
+                    }
+                }
+            }
+            prevC = curC; prevV = curV; prevX = curX;
+        }
+    }).detach();
+}
+
 static void OnDomReady(PrismaView view)
 {
     // The shell page is static and never navigates — nothing to inject into the outer frame.
@@ -1909,6 +2174,8 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     s_PrismaUI->SetScrollingPixelSize(s_View, 120);
     if (!s_cfg.keepBg)
         s_PrismaUI->Hide(s_View); // Start hidden unless KeepBackground=1
+
+    StartClipboardMonitor(); // C++ Ctrl+C/V polling — bypasses Ultralight event quirks
 
     // Close button in the HTML calls window.closeDashboard('') — wire it to OnToggle
     s_PrismaUI->RegisterJSListener(s_View, "closeDashboard", [](const char*) { OnToggle(); });
