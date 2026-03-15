@@ -11,9 +11,11 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <mmsystem.h>
 #pragma warning(pop)
 

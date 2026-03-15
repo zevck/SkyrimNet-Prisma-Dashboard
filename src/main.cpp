@@ -593,7 +593,111 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
 static std::string InjectPatches(std::string body)
 {
     static const std::string injection =
+        // ── Editor selection + key-repeat fixes ──────────────────────────────
+        // Injected before the app's own scripts so these rules take effect
+        // as soon as CM6 mounts its DOM.
+        "<style>\n"
+        // Force text selection on in CM6's contenteditable.
+        // Ultralight defaults contenteditable to user-select:none which
+        // breaks drag-to-select entirely.
+        ".cm-editor,.cm-content,.cm-line{"
+        "-webkit-user-select:text!important;user-select:text!important;"
+        "cursor:text!important;}\n"
+        // Make CM6's custom selection-background divs visible even if the
+        // engine doesn't render ::selection pseudo-elements.
+        ".cm-selectionBackground{"
+        "background:#3b82f6!important;opacity:0.35!important;"
+        "pointer-events:none!important;}\n"
+        ".cm-focused .cm-selectionBackground{"
+        "background:#3b82f6!important;opacity:0.45!important;}\n"
+        "</style>\n"
         "<script>\n"
+        // ── Key-repeat throttle for CM6 editors ──────────────────────────────
+        // When holding Backspace/Delete Ultralight fires keydown at the OS
+        // key-repeat rate (~30/s). Each event triggers a full CM6 transaction
+        // + DOM update, creating noticeable lag. Throttle repeats to ≤15/s
+        // (66 ms gap) — still fast enough to feel continuous.
+        "(function(){"
+        "var _krT=0;"
+        "document.addEventListener('keydown',function(e){"
+        "if(!e.repeat){_krT=0;return;}"
+        "if(e.key!=='Backspace'&&e.key!=='Delete')return;"
+        // Only throttle inside a CM6 editor so normal inputs aren't affected
+        "var p=e.target;"
+        "while(p){if(p.className&&typeof p.className==='string'"
+        "&&p.className.indexOf('cm-content')>=0)break;p=p.parentElement;}"
+        "if(!p)return;"
+        "var n=Date.now();"
+        "if(n-_krT<66){e.stopImmediatePropagation();e.preventDefault();return;}"
+        "_krT=n;"
+        "},true);"
+        "})();\n"
+        // ── CM6 drag-selection relay ──────────────────────────────────────────
+        // Ultralight suppresses mousemove/pointermove while a button is held AND
+        // may report e.buttons=0 on move events even when a button is down.
+        // Two-pronged fix:
+        //  1. setPointerCapture on pointerdown forces pointermove delivery to the
+        //     captured element regardless of Ultralight's normal suppression.
+        //  2. Use a _dragDown boolean flag instead of checking e.buttons, so we
+        //     don't bail out if the browser incorrectly reports buttons=0.
+        // On each move event we synthesize a shift+mousedown at the new position;
+        // CM6 treats that as "extend selection to here" — the same path shift+click uses.
+        "(function(){"
+        "var _dragCm=null,_dragDown=false,_dragStarted=false,_lastDragMs=0,_dragStartX=0,_dragStartY=0;"
+        // pointerdown: record cm-content target + force capture so pointermove fires.
+        "document.addEventListener('pointerdown',function(e){"
+        "if(e.button!==0||e.shiftKey)return;"
+        "_dragDown=true;_dragStarted=false;_dragCm=null;_dragStartX=e.clientX;_dragStartY=e.clientY;"
+        "var p=e.target;"
+        "while(p){"
+        "if(p.className&&typeof p.className==='string'"
+        "&&p.className.indexOf('cm-content')>=0){"
+        "_dragCm=p;"
+        "try{p.setPointerCapture(e.pointerId);}catch(_){}"
+        "break;}"
+        "p=p.parentElement;}"
+        "},true);"
+        // mousedown fallback (if pointerdown doesn't fire).
+        "document.addEventListener('mousedown',function(e){"
+        "if(e.button!==0||e.shiftKey||_dragCm)return;"
+        "_dragDown=true;_dragStarted=false;_dragStartX=e.clientX;_dragStartY=e.clientY;"
+        "var p=e.target;"
+        "while(p){"
+        "if(p.className&&typeof p.className==='string'"
+        "&&p.className.indexOf('cm-content')>=0){_dragCm=p;break;}"
+        "p=p.parentElement;}"
+        "},true);"
+        "var _clear=function(){_dragDown=false;_dragStarted=false;_dragCm=null;};"
+        "document.addEventListener('mouseup',_clear,true);"
+        "document.addEventListener('pointerup',_clear,true);"
+        "document.addEventListener('pointercancel',_clear,true);"
+        "function _onDragMove(e){"
+        "if(!_dragCm||!_dragDown)return;"
+        // One-shot 4px threshold — only gates the very first movement so that
+        // a stationary click doesn't fire. Once exceeded, _dragStarted=true and
+        // all subsequent moves (including back toward the start) fire normally.
+        "if(!_dragStarted){"
+        "var dx=e.clientX-_dragStartX,dy=e.clientY-_dragStartY;"
+        "if(dx*dx+dy*dy<16)return;"
+        "_dragStarted=true;}"
+        "var n=Date.now();if(n-_lastDragMs<16)return;_lastDragMs=n;"
+        // Reach the EditorView via _dragCm.cmView.
+        // _dragCm = .cm-content = view.contentDOM in CM6.
+        // CM6 sets contentDOM.cmView = DocView; DocView.view = EditorView.
+        // Property names are never mangled by terser so posAtCoords/dispatch work.
+        // Fall back to self._snpdView (set by the bundle patch on each doc change).
+        "var cv=_dragCm.cmView;"
+        "var view=(cv&&cv.view&&cv.view.posAtCoords)?cv.view"
+        ":((cv&&cv.posAtCoords)?cv:self._snpdView);"
+        "if(!view||!view.posAtCoords||!view.dispatch)return;"
+        "var pos=view.posAtCoords({x:e.clientX,y:e.clientY},false);"
+        "if(pos===null||pos===undefined)return;"
+        "var anchor=view.state.selection.main.anchor;"
+        "view.dispatch({selection:{anchor:anchor,head:pos}});"
+        "}"
+        "document.addEventListener('mousemove',_onDragMove,{capture:true,passive:true});"
+        "document.addEventListener('pointermove',_onDragMove,{capture:true,passive:true});"
+        "})();\n"
         // ── Dialog / nav compat ───────────────────────────────────────────────
         "window.confirm=function(){return true;};\n"
         "window.alert=function(){};\n"
@@ -700,6 +804,9 @@ static std::string PatchBundle(std::string body)
     // and removes the GC pressure that causes the periodic "every so often" stutter.
     static const std::string replacement =
         "e.docChanged){const _ss=e.state;"
+        // Also stash the live EditorView on a known global so InjectPatches drag
+        // handler can reach it without traversing CM6 internals.
+        "self._snpdView=e.view;"
         "clearTimeout(self._snpdCmTmr);self._snpdCmTmr=setTimeout(()=>b(_ss.doc.toString()),600)}";
     auto pos = body.find(needle);
     if (pos != std::string::npos) {
@@ -717,6 +824,34 @@ static std::string FetchAndInject(const std::string& host, uint16_t port)
         return "<html><body>Proxy error: could not fetch dashboard from " +
                host + ":" + std::to_string(port) + "</body></html>";
     return InjectPatches(std::move(body));
+}
+
+// ── Static asset cache ──────────────────────────────────────────────────────
+// JS/CSS/font/image assets from the SkyrimNet app use content-hashed filenames
+// (e.g. main.f6f3c786.js) and never change between requests. Caching them
+// in memory eliminates repeated 1.2 MB+ network fetches that cause FPS drops
+// on every React page transition.
+struct CachedAsset { std::string body; std::string contentType; };
+static std::mutex                          s_cacheMtx;
+static std::unordered_map<std::string, CachedAsset> s_assetCache;
+
+// Returns true for paths whose content cannot change (content-hash in filename
+// or well-known immutable extensions like fonts).
+static bool IsImmutableAsset(const std::string& ct, const std::string& path)
+{
+    // Content-hashed webpack output: filename contains 8+ hex chars before extension
+    static const std::string hexChars = "0123456789abcdefABCDEF";
+    auto dot = path.rfind('.');
+    auto dash = (dot != std::string::npos) ? path.rfind('.', dot - 1) : std::string::npos;
+    if (dash != std::string::npos && dot > dash + 1) {
+        std::string seg = path.substr(dash + 1, dot - dash - 1);
+        if (seg.size() >= 8 && seg.find_first_not_of(hexChars) == std::string::npos)
+            return true;
+    }
+    // Fonts and icons are always immutable
+    if (ct.find("font") != std::string::npos) return true;
+    if (ct.find("image/") != std::string::npos) return true;
+    return false;
 }
 
 static uint16_t StartShellServer(const std::string& shellHtml, const std::string& dashboardUrl)
@@ -852,20 +987,46 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
             } else if (path == "/proxy" || path == "/proxy/") {
                 body = FetchAndInject(proxyHost, proxyPort);
             } else {
-                auto [resBody, resCt] = FetchResource(proxyHost, proxyPort, method, path, reqCT, reqBody);
-                body        = std::move(resBody);
-                contentType = std::move(resCt);
-                if (contentType.find("text/html") != std::string::npos && !body.empty())
-                    body = InjectPatches(std::move(body));
-                else if (contentType.find("javascript") != std::string::npos && !body.empty())
-                    body = PatchBundle(std::move(body));
+                // Check in-memory cache first (GET only, static assets)
+                bool fromCache = false;
+                if (method == "GET") {
+                    std::lock_guard<std::mutex> lk(s_cacheMtx);
+                    auto it = s_assetCache.find(path);
+                    if (it != s_assetCache.end()) {
+                        body        = it->second.body;
+                        contentType = it->second.contentType;
+                        fromCache   = true;
+                    }
+                }
+                if (!fromCache) {
+                    auto [resBody, resCt] = FetchResource(proxyHost, proxyPort, method, path, reqCT, reqBody);
+                    body        = std::move(resBody);
+                    contentType = std::move(resCt);
+                    if (contentType.find("text/html") != std::string::npos && !body.empty())
+                        body = InjectPatches(std::move(body));
+                    else if (contentType.find("javascript") != std::string::npos && !body.empty())
+                        body = PatchBundle(std::move(body));
+                    // Cache immutable assets (content-hashed JS/CSS, fonts, images)
+                    if (method == "GET" && !body.empty() && IsImmutableAsset(contentType, path)) {
+                        std::lock_guard<std::mutex> lk(s_cacheMtx);
+                        s_assetCache[path] = { body, contentType };
+                        logger::info("SkyrimNetDashboard: cached {} ({} bytes)", path, body.size());
+                    }
+                }
             }
+
+            // Immutable assets get long-lived browser cache headers too,
+            // so Ultralight won't re-request them across soft navigations.
+            bool immutable = IsImmutableAsset(contentType, path);
+            std::string cacheControl = immutable
+                ? "max-age=31536000, immutable"
+                : "no-store";
 
             std::string resp =
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: " + contentType + "\r\n"
                 "Content-Length: " + std::to_string(body.size()) + "\r\n"
-                "Cache-Control: no-store\r\n"
+                "Cache-Control: " + cacheControl + "\r\n"
                 "Connection: close\r\n"
                 "\r\n" + body;
             send(client, resp.c_str(), static_cast<int>(resp.size()), 0);
