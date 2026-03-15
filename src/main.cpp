@@ -27,6 +27,7 @@ struct DashboardSettings {
 };
 
 static DashboardSettings s_cfg;
+static std::mutex        s_cfgMtx;  // protects concurrent reads/writes of s_cfg from HTTP handler threads
 static std::string       s_iniPath; // full path to the INI, populated in Load
 
 // DX scancode → display name for the settings UI
@@ -167,7 +168,6 @@ static void SaveSettings()
     logger::info("SkyrimNetDashboard: settings saved to INI");
 }
 
-static constexpr const char* SKYRIMNET_URL = "http://192.168.50.88:8080/"; // fallback — overridden by INI at startup
 static constexpr uint32_t    ESC_KEY       = 0x01; // Escape
 static constexpr uint32_t    INSPECTOR_KEY = 0x3F; // F5
 static uint32_t              s_toggleKey   = 0x3E; // runtime toggle key, set from s_cfg at startup
@@ -351,15 +351,18 @@ static void PlayAudioBytes(std::string bytes, const std::string& ct)
 
     if (isWav) {
         // WAV: play directly from memory -- no temp file, no file lock.
+        // Keep the mutex held through PlaySound so s_wavBuf can't be swapped
+        // out from under us if a second audio thread starts concurrently.
+        BOOL ok;
         {
             std::lock_guard<std::mutex> lk(s_wavBufMtx);
             s_wavBuf = std::move(bytes);
+            // PlaySound with SND_MEMORY (synchronous -- no SND_ASYNC) blocks this background
+            // thread until playback finishes, so we can fire the JS completion callback below.
+            // This is safe because we are already on a detached worker thread.
+            ok = PlaySound(reinterpret_cast<LPCSTR>(s_wavBuf.data()), nullptr,
+                           SND_MEMORY | SND_NODEFAULT);
         }
-        // PlaySound with SND_MEMORY (synchronous -- no SND_ASYNC) blocks this background
-        // thread until playback finishes, so we can fire the JS completion callback below.
-        // This is safe because we are already on a detached worker thread.
-        BOOL ok = PlaySound(reinterpret_cast<LPCSTR>(s_wavBuf.data()), nullptr,
-                            SND_MEMORY | SND_NODEFAULT);
         logger::info("SkyrimNetDashboard: PlaySound finished: {}", ok ? "ok" : "failed");
         // Notify JS that audio has ended so the UI can reset button states.
         if (s_PrismaUI && s_PrismaUI->IsValid(s_View)) {
@@ -1450,9 +1453,10 @@ static std::string InjectPatches(std::string body)
     return body;
 }
 
-// Patches the React app JS bundle before serving it.
-// Currently: debounces the CodeMirror onChange -> validation call from 0ms to 600ms
-// so syntax validation doesn't run on every keystroke, eliminating typing lag.
+// Patches CSS bundles before serving them.
+// Replaces prefers-color-scheme:dark media queries with @media all (Ultralight
+// never fires the dark query, so Tailwind dark: variants would otherwise be dead).
+// Also strips backdrop-filter declarations that Ultralight doesn't support.
 static std::string PatchCSS(std::string body)
 {
     // Ultralight never fires prefers-color-scheme:dark, so Tailwind's compiled
@@ -1893,7 +1897,7 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 body        = ((GetKeyState(VK_CONTROL) & 0x8000) != 0) ? "1" : "0";
                 contentType = "text/plain";
             } else if (path == "/settings-get") {
-                body        = SettingsToJson();
+                { std::lock_guard<std::mutex> lk(s_cfgMtx); body = SettingsToJson(); }
                 contentType = "application/json";
             } else if (path == "/settings-save") {
                 // Minimal JSON field extractor — no full parser needed
@@ -1929,11 +1933,20 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     if (reqBody.substr(pos, 5) == "false") return false;
                     return def;
                 };
-                int  newHotKey    = extractInt("hotKey",    s_cfg.hotKey);
-                bool newKeepBg    = extractBool("keepBg",    s_cfg.keepBg);
-                bool newDefHome   = extractBool("defaultHome", s_cfg.defaultHome);
-                bool newPause     = extractBool("pauseGame", s_cfg.pauseGame);
-                // Re-register hotkey if it changed
+                int  newHotKey; bool newKeepBg, newDefHome, newPause;
+                {
+                    std::lock_guard<std::mutex> lk(s_cfgMtx);
+                    newHotKey  = extractInt("hotKey",       s_cfg.hotKey);
+                    newKeepBg  = extractBool("keepBg",       s_cfg.keepBg);
+                    newDefHome = extractBool("defaultHome",  s_cfg.defaultHome);
+                    newPause   = extractBool("pauseGame",    s_cfg.pauseGame);
+                    s_cfg.hotKey      = newHotKey;
+                    s_cfg.keepBg      = newKeepBg;
+                    s_cfg.defaultHome = newDefHome;
+                    s_cfg.pauseGame   = newPause;
+                    SaveSettings();
+                }
+                // Re-register hotkey if it changed (KeyHandler has its own lock; no s_cfgMtx needed)
                 if (newHotKey != static_cast<int>(s_toggleKey) && newHotKey > 0) {
                     auto* kh = KeyHandler::GetSingleton();
                     if (s_toggleHandle != INVALID_REGISTRATION_HANDLE)
@@ -1943,11 +1956,6 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     logger::info("SkyrimNetDashboard: hotkey changed to {} (0x{:02X})",
                         DxKeyName(s_toggleKey), s_toggleKey);
                 }
-                s_cfg.hotKey      = newHotKey;
-                s_cfg.keepBg      = newKeepBg;
-                s_cfg.defaultHome = newDefHome;
-                s_cfg.pauseGame   = newPause;
-                SaveSettings();
                 body        = "{\"saved\":true}";
                 contentType = "application/json";
             } else if (path == "/audio-raw") {
@@ -2149,7 +2157,7 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
         return;
     }
 
-    // 2. Parse the SkyrimNet server address for the audio subsystem
+    // 3. Parse the SkyrimNet server address for the audio subsystem
     {
         std::string u = s_cfg.url;
         if (u.size() > 7 && u.substr(0, 7) == "http://") u = u.substr(7);
@@ -2166,7 +2174,7 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
         logger::info("SkyrimNetDashboard: audio backend {}:{}", s_audioHost, s_audioPort);
     }
 
-    // 3. Build the chrome shell page and start the local HTTP server
+    // 4. Build the chrome shell page and start the local HTTP server
     std::string shellHtml = BuildShellHtml();
     std::string startUrl  = (s_cfg.defaultHome || s_cfg.lastPage.empty())
                             ? s_cfg.url : s_cfg.lastPage;
@@ -2177,7 +2185,7 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     }
     std::string shellUrl = "http://127.0.0.1:" + std::to_string(port) + "/shell";
 
-    // 3. Create a view that loads the shell page (chrome + iframe pointing at SkyrimNet)
+    // 5. Create a view that loads the shell page (chrome + iframe pointing at SkyrimNet)
     s_View = s_PrismaUI->CreateView(shellUrl.c_str(), OnDomReady);
     s_PrismaUI->SetScrollingPixelSize(s_View, 120);
     if (!s_cfg.keepBg)
@@ -2190,7 +2198,7 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
 
     logger::info("SkyrimNetDashboard: Shell view created at {} (iframe -> {})", shellUrl, startUrl);
 
-    // 3. Register hotkey to toggle the overlay
+    // 6. Register hotkey to toggle the overlay
     s_toggleKey    = static_cast<uint32_t>(s_cfg.hotKey);
     KeyHandler::RegisterSink();
     s_toggleHandle = KeyHandler::GetSingleton()->Register(

@@ -543,3 +543,4 @@ build/dobuild.bat
 .resources/PrismaUI-SkyrimNet-Plugin/
 NAVIGATION_FLASH_RESEARCH.md
 SkyrimNet Prisma Dashboard.code-workspace
+/build
