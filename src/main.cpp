@@ -1083,6 +1083,14 @@ static std::string InjectPatches(std::string body)
         "pointer-events:none!important;}\n"
         ".cm-focused .cm-selectionBackground{"
         "background:#3b82f6!important;opacity:0.45!important;}\n"
+        // Dropdowns: Ultralight ignores background overrides on <select> and
+        // keeps a native light gray. Use black text so it's readable on that bg.
+        "select{"
+        "color:#000000!important;"
+        "border:1px solid #4b5563!important;border-radius:4px!important;"
+        "padding:2px 4px!important;}\n"
+        "select option{"
+        "color:#000000!important;}\n"
         "</style>\n"
         "<script>\n"
         // ── Key-repeat throttle for CM6 editors ──────────────────────────────
