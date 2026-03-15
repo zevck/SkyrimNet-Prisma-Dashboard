@@ -374,21 +374,49 @@ html,body{width:100%;height:100%;background:transparent;overflow:hidden}
 #B{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:#1f2937;border-bottom:1px solid #374151;border-radius:8px 8px 0 0;user-select:none;-webkit-user-select:none;cursor:grab}
 #L{display:flex;align-items:center;gap:8px;color:#9ca3af;font-size:14px;font-family:Consolas,"Courier New",monospace;font-weight:600;pointer-events:none}
 #R{display:flex;align-items:center;gap:8px}
-.btn{display:flex;align-items:center;gap:4px;padding:4px 12px;background:#374151;border:none;border-radius:4px;color:#fff;font-size:12px;font-family:Consolas,"Courier New",monospace;cursor:pointer}
+.btn{display:flex;align-items:center;gap:4px;padding:4px 12px;background:#374151;border:none;border-radius:4px;color:#fff;font-size:12px;font-family:Consolas,"Courier New",monospace;cursor:pointer;pointer-events:auto}
+.btn.icon{padding:4px 7px}
 .btn:hover{background:#4b5563}
 #XB{display:flex;align-items:center;padding:4px 8px;background:#dc2626;border:none;border-radius:4px;color:#fff;cursor:pointer}
 #XB:hover{background:#ef4444}
 #C{flex:1;overflow:hidden;min-height:0;border-radius:0 0 6px 6px;position:relative}
 iframe{width:100%;height:100%;border:none;display:block}
 #OL{display:none;position:absolute;inset:0;z-index:1;cursor:grabbing}
+.rh{position:absolute;z-index:200}
+.rh[data-r=n]{top:-5px;left:12px;right:12px;height:6px;cursor:n-resize}
+.rh[data-r=s]{bottom:-5px;left:12px;right:12px;height:10px;cursor:s-resize}
+.rh[data-r=e]{right:-5px;top:12px;bottom:12px;width:10px;cursor:e-resize}
+.rh[data-r=w]{left:-5px;top:12px;bottom:12px;width:10px;cursor:w-resize}
+.rh[data-r=nw]{top:-5px;left:-5px;width:10px;height:10px;cursor:nw-resize}
+.rh[data-r=ne]{top:-5px;right:-5px;width:10px;height:10px;cursor:ne-resize}
+.rh[data-r=se]{bottom:-5px;right:-5px;width:18px;height:18px;cursor:se-resize}
+.rh[data-r=sw]{bottom:-5px;left:-5px;width:14px;height:14px;cursor:sw-resize}
+#W.fs .rh{display:none}
+/* Persistent faint L-brackets in each corner */
+.rh[data-r=se]::before,.rh[data-r=sw]::before,.rh[data-r=ne]::before,.rh[data-r=nw]::before{content:'';position:absolute;width:7px;height:7px}
+.rh[data-r=se]::before{bottom:3px;right:3px;border-right:2px solid rgba(156,163,175,.35);border-bottom:2px solid rgba(156,163,175,.35)}
+.rh[data-r=sw]::before{bottom:3px;left:3px;border-left:2px solid rgba(156,163,175,.35);border-bottom:2px solid rgba(156,163,175,.35)}
+.rh[data-r=ne]::before{top:3px;right:3px;border-right:2px solid rgba(156,163,175,.35);border-top:2px solid rgba(156,163,175,.35)}
+.rh[data-r=nw]::before{top:3px;left:3px;border-left:2px solid rgba(156,163,175,.35);border-top:2px solid rgba(156,163,175,.35)}
+/* Hover: semi-transparent fill + bright indicators */
+.rh:hover{background:rgba(99,102,241,.15)}
+.rh[data-r=se]:hover::before,.rh[data-r=sw]:hover::before,.rh[data-r=ne]:hover::before,.rh[data-r=nw]:hover::before{border-color:rgba(99,102,241,.95)}
+.rh[data-r=n]:hover::after,.rh[data-r=s]:hover::after{content:'';position:absolute;left:calc(50% - 18px);top:calc(50% - 1.5px);width:36px;height:3px;border-radius:2px;background:rgba(99,102,241,.85)}
+.rh[data-r=e]:hover::after,.rh[data-r=w]:hover::after{content:'';position:absolute;top:calc(50% - 18px);left:calc(50% - 1.5px);width:3px;height:36px;border-radius:2px;background:rgba(99,102,241,.85)}
 </style>
 </head>
 <body>
 <div id="W">
+  <div class="rh" data-r="n"></div><div class="rh" data-r="s"></div>
+  <div class="rh" data-r="e"></div><div class="rh" data-r="w"></div>
+  <div class="rh" data-r="nw"></div><div class="rh" data-r="ne"></div>
+  <div class="rh" data-r="se"></div><div class="rh" data-r="sw"></div>
   <div id="B">
     <div id="L">
       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
       <span>SkyrimNet</span>
+      <button class="btn icon" id="HB" title="Home"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></button>
+      <button class="btn icon" id="RB" title="Refresh"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
     </div>
     <div id="R">
       <button class="btn" id="FB"></button>
@@ -403,7 +431,10 @@ iframe{width:100%;height:100%;border:none;display:block}
       B=document.getElementById('B'),
       FB=document.getElementById('FB'),
       XB=document.getElementById('XB'),
-      OL=document.getElementById('OL');
+      HB=document.getElementById('HB'),
+      RB=document.getElementById('RB'),
+      OL=document.getElementById('OL'),
+      FR=document.getElementById('snpd-frame');
   var fs=localStorage.getItem('snpd-fs')==='true';
   var drag=false,ox=0,oy=0;
   var MAX_SVG='<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
@@ -411,14 +442,18 @@ iframe{width:100%;height:100%;border:none;display:block}
   function applyFs(){
     if(fs){
       W.style.cssText='position:fixed;top:0;left:0;width:100vw;height:100vh;max-width:100vw;max-height:100vh;transform:none;display:flex;flex-direction:column;background:#111827;border:none;border-radius:0;box-shadow:none;z-index:99999';
+      W.classList.add('fs');
       B.style.borderRadius='0';B.style.cursor='default';
       FB.innerHTML=MIN_SVG+'<span>Windowed</span>';
     } else {
       W.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:2000px;max-width:95vw;height:1200px;max-height:95vh;display:flex;flex-direction:column;background:#111827;border:2px solid #444;border-radius:8px;box-shadow:0 0 30px rgba(0,0,0,.8);z-index:99999';
+      W.classList.remove('fs');
       B.style.borderRadius='8px 8px 0 0';B.style.cursor='grab';
       FB.innerHTML=MAX_SVG+'<span>Fullscreen</span>';
       var sx=localStorage.getItem('snpd-x'),sy=localStorage.getItem('snpd-y');
       if(sx&&sy){W.style.transform='none';W.style.left=sx;W.style.top=sy;}
+      var sw=localStorage.getItem('snpd-w'),sh=localStorage.getItem('snpd-h');
+      if(sw&&sh){W.style.width=sw;W.style.height=sh;W.style.maxWidth='none';W.style.maxHeight='none';}
     }
   }
   applyFs();
@@ -426,6 +461,16 @@ iframe{width:100%;height:100%;border:none;display:block}
   FB.addEventListener('click',function(e){
     e.stopPropagation();
     fs=!fs;localStorage.setItem('snpd-fs',String(fs));applyFs();
+  });
+  HB.addEventListener('mousedown',function(e){e.stopPropagation();});
+  HB.addEventListener('click',function(e){
+    e.stopPropagation();
+    FR.src='/proxy';
+  });
+  RB.addEventListener('mousedown',function(e){e.stopPropagation();});
+  RB.addEventListener('click',function(e){
+    e.stopPropagation();
+    FR.contentWindow.location.reload();
   });
   XB.addEventListener('mousedown',function(e){e.stopPropagation();});
   XB.addEventListener('click',function(e){
@@ -460,11 +505,44 @@ iframe{width:100%;height:100%;border:none;display:block}
   // Belt-and-suspenders: patch the iframe's window object directly (same origin).
   // Ultralight may route iframe dialogs through the top-level window context,
   // so overriding here catches those cases too.
-  var snpdFr=document.getElementById('snpd-frame');
+  var snpdFr=FR;
   function snpdPatch(){try{var cw=snpdFr.contentWindow;if(!cw)return;cw.confirm=function(){return true;};cw.alert=function(){};cw.prompt=function(m,d){return d!==undefined?d:'';};cw.open=function(url){if(url)cw.location.href=url;return cw;};}catch(_){}}
   snpdFr.addEventListener('load',snpdPatch);
   // C++ Invoke() runs in this (shell) frame -- bridge __onAudioEnded into the same-origin iframe.
   window.__onAudioEnded=function(){try{var cw=snpdFr.contentWindow;if(cw&&cw.__onAudioEnded)cw.__onAudioEnded();}catch(_){}};
+
+  // ── Resize handles ─────────────────────────────────────────────────────────
+  var rDir=null,rSX=0,rSY=0,rRect=null;
+  var RMIN_W=320,RMIN_H=200;
+  document.querySelectorAll('.rh').forEach(function(h){
+    h.addEventListener('mousedown',function(e){
+      if(fs||e.button!==0)return;
+      e.preventDefault();e.stopPropagation();
+      rDir=h.dataset.r;rSX=e.clientX;rSY=e.clientY;
+      var r=W.getBoundingClientRect();
+      rRect={left:r.left,top:r.top,width:r.width,height:r.height};
+      W.style.transform='none';W.style.left=r.left+'px';W.style.top=r.top+'px';
+      W.style.width=r.width+'px';W.style.height=r.height+'px';
+      W.style.maxWidth='none';W.style.maxHeight='none';
+      OL.style.display='block';
+    });
+  });
+  document.addEventListener('mousemove',function(e){
+    if(!rDir)return;
+    var dx=e.clientX-rSX,dy=e.clientY-rSY,r=rRect;
+    var nL=r.left,nT=r.top,nW=r.width,nH=r.height;
+    if(rDir.indexOf('e')>=0){nW=Math.max(RMIN_W,r.width+dx);}
+    if(rDir.indexOf('w')>=0){var w2=Math.max(RMIN_W,r.width-dx);nL=r.left+(r.width-w2);nW=w2;}
+    if(rDir.indexOf('s')>=0){nH=Math.max(RMIN_H,r.height+dy);}
+    if(rDir.indexOf('n')>=0){var h2=Math.max(RMIN_H,r.height-dy);nT=r.top+(r.height-h2);nH=h2;}
+    W.style.left=nL+'px';W.style.top=nT+'px';W.style.width=nW+'px';W.style.height=nH+'px';
+  });
+  document.addEventListener('mouseup',function(){
+    if(!rDir)return;
+    rDir=null;OL.style.display='none';
+    localStorage.setItem('snpd-x',W.style.left);localStorage.setItem('snpd-y',W.style.top);
+    localStorage.setItem('snpd-w',W.style.width);localStorage.setItem('snpd-h',W.style.height);
+  });
 
 })();
 </script>
@@ -596,6 +674,8 @@ static std::string InjectPatches(std::string body)
         // ── Editor selection + key-repeat fixes ──────────────────────────────
         // Injected before the app's own scripts so these rules take effect
         // as soon as CM6 mounts its DOM.
+        // Ultralight doesn't fire prefers-color-scheme:dark, so Tailwind dark:
+        // variants never activate. We patch the CSS bundle instead (see PatchCSS).
         "<style>\n"
         // Force text selection on in CM6's contenteditable.
         // Ultralight defaults contenteditable to user-select:none which
@@ -793,6 +873,26 @@ static std::string InjectPatches(std::string body)
 // Patches the React app JS bundle before serving it.
 // Currently: debounces the CodeMirror onChange -> validation call from 0ms to 600ms
 // so syntax validation doesn't run on every keystroke, eliminating typing lag.
+static std::string PatchCSS(std::string body)
+{
+    // Ultralight never fires prefers-color-scheme:dark, so Tailwind's compiled
+    // dark: variants are dead code. Replace the media query wrapper with
+    // @media all so all dark: rules always apply. They sit later in the CSS
+    // than their light counterparts, so they win the cascade automatically.
+    static const std::string needle   = "@media (prefers-color-scheme: dark)";
+    static const std::string replaced = "@media all";
+    std::string::size_type pos = 0;
+    int count = 0;
+    while ((pos = body.find(needle, pos)) != std::string::npos) {
+        body.replace(pos, needle.size(), replaced);
+        pos += replaced.size();
+        ++count;
+    }
+    if (count)
+        logger::info("SkyrimNetDashboard: PatchCSS: replaced {} dark media queries", count);
+    return body;
+}
+
 static std::string PatchBundle(std::string body)
 {
     // CodeMirror updateListener fires onChange(text) every keystroke via setTimeout(fn,0).
@@ -1006,6 +1106,8 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                         body = InjectPatches(std::move(body));
                     else if (contentType.find("javascript") != std::string::npos && !body.empty())
                         body = PatchBundle(std::move(body));
+                    else if (contentType.find("text/css") != std::string::npos && !body.empty())
+                        body = PatchCSS(std::move(body));
                     // Cache immutable assets (content-hashed JS/CSS, fonts, images)
                     if (method == "GET" && !body.empty() && IsImmutableAsset(contentType, path)) {
                         std::lock_guard<std::mutex> lk(s_cacheMtx);
