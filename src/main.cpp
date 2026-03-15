@@ -2210,28 +2210,21 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
         DxKeyName(s_toggleKey));
 }
 
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface* a_skse, SKSE::PluginInfo* a_info)
+// Declare the plugin to SKSE for all runtime variants (SE/AE/VR).
+// SKSEPluginInfo emits both the modern SKSEPlugin_Version constinit struct (read by SKSE NG)
+// and a legacy SKSEPlugin_Query shim (for older SKSE builds), so one binary works everywhere.
+// RuntimeCompatibility = AddressLibrary means version-independent via Address Library (CommonLib NG default).
+using namespace REL::literals;
+SKSEPluginInfo(
+    .Version              = { 1, 0, 0, 0 },
+    .Name                 = PLUGIN_NAME ""sv,
+    .Author               = ""sv,
+    .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary
+);
+
+SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
-    a_info->infoVersion = SKSE::PluginInfo::kVersion;
-    a_info->name        = PLUGIN_NAME;
-    a_info->version     = 1;
-
-    if (a_skse->IsEditor()) {
-        return false;
-    }
-
-    const auto ver = a_skse->RuntimeVersion();
-    if (ver < SKSE::RUNTIME_SSE_1_5_39) {
-        return false;
-    }
-
-    return true;
-}
-
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
-{
-    SKSE::Init(a_skse, false);  // false = don't let SKSE init the logger (plugin uses old-style SKSEPlugin_Query, so GetPluginName() is empty and log::init() would create ".log" instead of "SkyrimNetPrismaDashboard.log")
-    SetupLog();
+    SKSE::Init(a_skse);
     logger::info("SkyrimNetDashboard: Plugin loaded.");
 
     auto* messaging = SKSE::GetMessagingInterface();
