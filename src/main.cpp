@@ -958,22 +958,87 @@ static std::string PatchCSS(std::string body)
     // dark: variants are dead code. Replace the media query wrapper with
     // @media all so all dark: rules always apply. They sit later in the CSS
     // than their light counterparts, so they win the cascade automatically.
-    static const std::string needle   = "@media (prefers-color-scheme: dark)";
-    static const std::string replaced = "@media all";
-    std::string::size_type pos = 0;
-    int count = 0;
-    while ((pos = body.find(needle, pos)) != std::string::npos) {
-        body.replace(pos, needle.size(), replaced);
-        pos += replaced.size();
-        ++count;
+    {
+        static const std::string needle   = "@media (prefers-color-scheme: dark)";
+        static const std::string replaced = "@media all";
+        std::string::size_type pos = 0;
+        int count = 0;
+        while ((pos = body.find(needle, pos)) != std::string::npos) {
+            body.replace(pos, needle.size(), replaced);
+            pos += replaced.size();
+            ++count;
+        }
+        if (count)
+            logger::info("SkyrimNetDashboard: PatchCSS: replaced {} dark media queries", count);
     }
-    if (count)
-        logger::info("SkyrimNetDashboard: PatchCSS: replaced {} dark media queries", count);
+
+    // Ultralight doesn't support backdrop-filter at all.
+    // Strip every  backdrop-filter: ...; declaration so it can't affect layout.
+    // (The CSS still contains --tw-backdrop-blur etc. custom properties and the
+    // backdrop-filter: var(...) rule; removing those declarations is harmless.)
+    {
+        int count = 0;
+        std::string::size_type pos = 0;
+        static const std::string bfProp = "backdrop-filter:";
+        while ((pos = body.find(bfProp, pos)) != std::string::npos) {
+            // Find end of declaration (next semicolon)
+            auto semi = body.find(';', pos);
+            if (semi == std::string::npos) break;
+            // Replace  backdrop-filter: ...;  with whitespace of the same length
+            // so we don't shift any other positions in the file.
+            std::fill(body.begin() + pos, body.begin() + semi + 1, ' ');
+            pos = semi + 1;
+            ++count;
+        }
+        if (count)
+            logger::info("SkyrimNetDashboard: PatchCSS: stripped {} backdrop-filter declarations", count);
+    }
+
+    return body;
+}
+
+static std::string ReplaceAll(std::string body, const std::string& needle, const std::string& rep)
+{
+    std::string::size_type pos = 0;
+    while ((pos = body.find(needle, pos)) != std::string::npos) {
+        body.replace(pos, needle.size(), rep);
+        pos += rep.size();
+    }
     return body;
 }
 
 static std::string PatchBundle(std::string body)
 {
+    // ── glassEffect / cardBg opacity fix ─────────────────────────────────────
+    // Ultralight doesn't support backdrop-filter, so classes like
+    // bg-white/30 + backdrop-blur-lg render as near-transparent boxes (the blur
+    // that was supposed to make them readable does nothing).
+    // Fix: replace low-opacity glass colours with fully-opaque equivalents.
+    // Light theme
+    body = ReplaceAll(std::move(body),
+        "glassEffect:\"bg-white/30 backdrop-blur-lg border-white/40\"",
+        "glassEffect:\"bg-white border-gray-200\"");
+    // Dark / matrix theme
+    body = ReplaceAll(std::move(body),
+        "glassEffect:\"bg-black/60 backdrop-blur-md border-green-500/20\"",
+        "glassEffect:\"bg-gray-900 border-green-500/40\"");
+    // cardBg light
+    body = ReplaceAll(std::move(body),
+        "cardBg:\"bg-white/80\"",
+        "cardBg:\"bg-white\"");
+    // cardBg dark
+    body = ReplaceAll(std::move(body),
+        "cardBg:\"bg-gray-900/95\"",
+        "cardBg:\"bg-gray-900\"");
+    // Modal overlay: keep it dark but remove the unsupported backdrop-blur
+    body = ReplaceAll(std::move(body),
+        "\"fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50\"",
+        "\"fixed inset-0 bg-black/80 flex items-center justify-center z-50\"");
+    {
+        auto cnt = [](const std::string&) { return 0; }; (void)cnt;
+        logger::info("SkyrimNetDashboard: PatchBundle: patched glassEffect/cardBg opacity");
+    }
+
     // ── Log file download fix ─────────────────────────────────────────────────
     // The app's download handler creates a blob: URL then calls a.click() to
     // trigger a browser Save-As dialog. Ultralight doesn't support <a download>
