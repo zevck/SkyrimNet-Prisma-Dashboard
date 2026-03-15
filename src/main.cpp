@@ -783,6 +783,46 @@ static std::string InjectPatches(std::string body)
         "window.alert=function(){};\n"
         "window.prompt=function(m,d){return d!==undefined?d:'';}\n"
         "window.open=function(url){if(url)window.location.href=url;return window;};\n"
+        // ── Custom prompt modal ───────────────────────────────────────────────
+        // Ultralight has no native window.prompt. Provide _snpdShowPrompt(msg, def)
+        // which renders a modal overlay with a text input. On OK/Enter calls
+        // self._snpdPromptCb(value); on Cancel calls self._snpdPromptCb(null).
+        "(function(){"
+        "var _ov=null;"
+        "self._snpdShowPrompt=function(msg,def){"
+        "if(_ov)_ov.remove();"
+        "_ov=document.createElement('div');"
+        "_ov.style.cssText='position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)';"
+        "var box=document.createElement('div');"
+        "box.style.cssText='background:#1f2937;border:1px solid #374151;border-radius:8px;padding:24px;min-width:340px;max-width:480px;box-shadow:0 20px 60px rgba(0,0,0,.8);display:flex;flex-direction:column;gap:12px';"
+        "var lbl=document.createElement('div');"
+        "lbl.style.cssText='color:#f9fafb;font-size:14px;font-family:Consolas,monospace';"
+        "lbl.textContent=msg||'';"
+        "var inp=document.createElement('input');"
+        "inp.type='text';inp.value=def||'';"
+        "inp.style.cssText='background:#111827;border:1px solid #4b5563;border-radius:4px;color:#f9fafb;font-size:14px;font-family:Consolas,monospace;padding:8px 10px;outline:none;width:100%;box-sizing:border-box';"
+        "var row=document.createElement('div');"
+        "row.style.cssText='display:flex;gap:8px;justify-content:flex-end';"
+        "var ok=document.createElement('button');"
+        "ok.textContent='OK';"
+        "ok.style.cssText='padding:6px 18px;background:#3b82f6;border:none;border-radius:4px;color:#fff;font-size:13px;cursor:pointer';"
+        "var cancel=document.createElement('button');"
+        "cancel.textContent='Cancel';"
+        "cancel.style.cssText='padding:6px 18px;background:#374151;border:none;border-radius:4px;color:#fff;font-size:13px;cursor:pointer';"
+        "function _ok(){var v=inp.value.trim();_ov.remove();_ov=null;if(self._snpdPromptCb)self._snpdPromptCb(v||null);}"
+        "function _cancel(){_ov.remove();_ov=null;if(self._snpdPromptCb)self._snpdPromptCb(null);}"
+        "ok.addEventListener('click',_ok);"
+        "cancel.addEventListener('click',_cancel);"
+        "inp.addEventListener('keydown',function(e){"
+        "if(e.key==='Enter'){e.preventDefault();_ok();}"
+        "else if(e.key==='Escape'){e.preventDefault();_cancel();}"
+        "e.stopPropagation();});"  // prevent CM6 key handlers eating keystrokes
+        "row.appendChild(cancel);row.appendChild(ok);"
+        "box.appendChild(lbl);box.appendChild(inp);box.appendChild(row);"
+        "_ov.appendChild(box);document.body.appendChild(_ov);"
+        "setTimeout(function(){inp.focus();inp.select();},50);"
+        "};"
+        "})();\n"
         // ── Audio bridge ─────────────────────────────────────────────────────
         // Ultralight has no HTMLMediaElement/Web Audio support. Override the
         // Audio constructor and HTMLAudioElement prototype so SkyrimNet's calls
@@ -908,6 +948,23 @@ static std::string PatchBundle(std::string body)
         // handler can reach it without traversing CM6 internals.
         "self._snpdView=e.view;"
         "clearTimeout(self._snpdCmTmr);self._snpdCmTmr=setTimeout(()=>b(_ss.doc.toString()),600)}";
+    // Patch 2: Replace synchronous prompt() call in "Add new prompt" handler with
+    // an async modal dialog, since Ultralight doesn't support window.prompt().
+    // The original: S=e=>{const t=prompt("Enter prompt name...");if(t){...}k()}
+    // Replacement: show a custom modal, then run the same logic on confirm.
+    static const std::string promptNeedle =
+        R"(S=e=>{const t=prompt("Enter prompt name (without .prompt extension):");)"
+        R"(if(t){const s=e.path?`${e.path}/${t}.prompt`:`${t}.prompt`;n(s,e)}k()})";
+    static const std::string promptReplacement =
+        "S=e=>{self._snpdPromptCb=t=>{if(t){const s=e.path?`${e.path}/${t}.prompt`:`${t}.prompt`;n(s,e)}k()};"
+        "self._snpdShowPrompt('Enter prompt name (without .prompt extension):','')}";
+    {
+        auto pos2 = body.find(promptNeedle);
+        if (pos2 != std::string::npos) {
+            body.replace(pos2, promptNeedle.size(), promptReplacement);
+            logger::info("SkyrimNetDashboard: PatchBundle: prompt() dialog patch applied");
+        }
+    }
     auto pos = body.find(needle);
     if (pos != std::string::npos) {
         body.replace(pos, needle.size(), replacement);
