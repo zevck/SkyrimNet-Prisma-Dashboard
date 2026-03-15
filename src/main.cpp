@@ -11,13 +11,170 @@
 #define PLUGIN_NAME    "SkyrimNetPrismaDashboard"
 #define PLUGIN_VERSION "1.0.0"
 
-static constexpr const char* SKYRIMNET_URL = "http://192.168.50.88:8080/";
-static constexpr uint32_t    TOGGLE_KEY    = 0x3E; // F4
+// ── INI settings ─────────────────────────────────────────────────────────────
+// Loaded once at startup from SKSE/Plugins/SkyrimNetPrismaDashboard.ini.
+// All mutable settings are stored here and flushed back to the INI via
+// /settings-save.  URL is intentionally read-only at runtime (INI only).
+
+struct DashboardSettings {
+    // [Dashboard]
+    std::string url          = "http://192.168.50.88:8080/";
+    std::string lastPage     = "";
+    int         hotKey       = 0x3E;  // DX scancode — default F4
+    bool        keepBg       = false; // keep page alive when closed
+    bool        defaultHome  = false; // always open base URL instead of lastPage
+    bool        pauseGame    = false; // pause while focused
+};
+
+static DashboardSettings s_cfg;
+static std::string       s_iniPath; // full path to the INI, populated in Load
+
+// DX scancode → display name for the settings UI
+static std::string DxKeyName(int dx)
+{
+    // Common keys a user would pick for a toggle
+    static const std::pair<int,const char*> kNames[] = {
+        {0x3B,"F1"},{0x3C,"F2"},{0x3D,"F3"},{0x3E,"F4"},
+        {0x3F,"F5"},{0x40,"F6"},{0x41,"F7"},{0x42,"F8"},
+        {0x43,"F9"},{0x44,"F10"},{0x57,"F11"},{0x58,"F12"},
+        {0x02,"1"},{0x03,"2"},{0x04,"3"},{0x05,"4"},{0x06,"5"},
+        {0x07,"6"},{0x08,"7"},{0x09,"8"},{0x0A,"9"},{0x0B,"0"},
+        {0x10,"Q"},{0x11,"W"},{0x12,"E"},{0x13,"R"},{0x14,"T"},
+        {0x15,"Y"},{0x16,"U"},{0x17,"I"},{0x18,"O"},{0x19,"P"},
+        {0x1E,"A"},{0x1F,"S"},{0x20,"D"},{0x21,"F"},{0x22,"G"},
+        {0x23,"H"},{0x24,"J"},{0x25,"K"},{0x26,"L"},
+        {0x2C,"Z"},{0x2D,"X"},{0x2E,"C"},{0x2F,"V"},{0x30,"B"},
+        {0x31,"N"},{0x32,"M"},
+        {0x29,"Tilde (~)"},{0x0C,"Minus (-)"},{0x0D,"Equals (=)"},
+        {0x1A,"["},{0x1B,"]"},{0x27,";"},{0x28,"'"},{0x56,"\\"},
+        {0x33,","},{0x34,"."},{0x35,"/"},
+        {0xC7,"Home"},{0xD2,"Insert"},{0xD3,"Delete"},
+        {0xC9,"Page Up"},{0xD1,"Page Down"},{0xC8,"Up"},{0xD0,"Down"},
+        {0xCB,"Left"},{0xCD,"Right"},
+        {0x52,"Numpad 0"},{0x4F,"Numpad 1"},{0x50,"Numpad 2"},
+        {0x51,"Numpad 3"},{0x4B,"Numpad 4"},{0x4C,"Numpad 5"},
+        {0x4D,"Numpad 6"},{0x47,"Numpad 7"},{0x48,"Numpad 8"},
+        {0x49,"Numpad 9"},{0x4E,"Numpad +"},{0x4A,"Numpad -"},
+        {0x37,"Numpad *"},{0xB5,"Numpad /"},
+    };
+    for (auto& p : kNames) if (p.first == dx) return p.second;
+    char buf[8]; snprintf(buf, sizeof(buf), "0x%02X", dx);
+    return buf;
+}
+
+// Build JSON for current settings (for /settings-get)
+static std::string SettingsToJson()
+{
+    // Escape backslashes in lastPage URL (shouldn't have any but be safe)
+    std::string lp; for (auto c : s_cfg.lastPage) { if(c=='"'||c=='\\') lp+='\\'; lp+=c; }
+    std::string url; for (auto c : s_cfg.url) { if(c=='"'||c=='\\') url+='\\'; url+=c; }
+    // Build key list JSON array for the UI dropdown
+    static const std::pair<int,const char*> kNames[] = {
+        {0x3B,"F1"},{0x3C,"F2"},{0x3D,"F3"},{0x3E,"F4"},
+        {0x3F,"F5"},{0x40,"F6"},{0x41,"F7"},{0x42,"F8"},
+        {0x43,"F9"},{0x44,"F10"},{0x57,"F11"},{0x58,"F12"},
+        {0x02,"1"},{0x03,"2"},{0x04,"3"},{0x05,"4"},{0x06,"5"},
+        {0x07,"6"},{0x08,"7"},{0x09,"8"},{0x0A,"9"},{0x0B,"0"},
+        {0x10,"Q"},{0x11,"W"},{0x12,"E"},{0x13,"R"},{0x14,"T"},
+        {0x15,"Y"},{0x16,"U"},{0x17,"I"},{0x18,"O"},{0x19,"P"},
+        {0x1E,"A"},{0x1F,"S"},{0x20,"D"},{0x21,"F"},{0x22,"G"},
+        {0x23,"H"},{0x24,"J"},{0x25,"K"},{0x26,"L"},
+        {0x2C,"Z"},{0x2D,"X"},{0x2E,"C"},{0x2F,"V"},{0x30,"B"},
+        {0x31,"N"},{0x32,"M"},
+        {0x29,"Tilde (~)"},{0x0C,"Minus (-)"},{0x0D,"Equals (=)"},
+        {0x1A,"["},{0x1B,"]"},{0x27,";"},{0x28,"'"},{0x56,"\\\\"},
+        {0x33,","},{0x34,"."},{0x35,"/"},
+        {0xC7,"Home"},{0xD2,"Insert"},{0xD3,"Delete"},
+        {0xC9,"Page Up"},{0xD1,"Page Down"},{0xC8,"Up"},{0xD0,"Down"},
+        {0xCB,"Left"},{0xCD,"Right"},
+        {0x52,"Numpad 0"},{0x4F,"Numpad 1"},{0x50,"Numpad 2"},
+        {0x51,"Numpad 3"},{0x4B,"Numpad 4"},{0x4C,"Numpad 5"},
+        {0x4D,"Numpad 6"},{0x47,"Numpad 7"},{0x48,"Numpad 8"},
+        {0x49,"Numpad 9"},{0x4E,"Numpad +"},{0x4A,"Numpad -"},
+        {0x37,"Numpad *"},{0xB5,"Numpad /"},
+    };
+    std::string keys = "[";
+    for (auto& p : kNames) {
+        if (keys.size() > 1) keys += ',';
+        keys += "{\"code\":" + std::to_string(p.first) + ",\"name\":\"" + p.second + "\"}";
+    }
+    keys += "]";
+    return std::string("{") +
+        "\"url\":\""          + url  + "\"," +
+        "\"hotKey\":"         + std::to_string(s_cfg.hotKey) + "," +
+        "\"hotKeyName\":\""   + DxKeyName(s_cfg.hotKey) + "\"," +
+        "\"keepBg\":"         + (s_cfg.keepBg      ? "true" : "false") + "," +
+        "\"defaultHome\":"    + (s_cfg.defaultHome  ? "true" : "false") + "," +
+        "\"pauseGame\":"      + (s_cfg.pauseGame    ? "true" : "false") + "," +
+        "\"keys\":"           + keys +
+        "}";
+}
+
+static void LoadSettings()
+{
+    // Locate the INI next to the DLL: <SKSE log dir>/../../Plugins/...ini
+    // The most reliable path is from the module filename itself.
+    {
+        char modPath[MAX_PATH] = {};
+        HMODULE hm = nullptr;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&LoadSettings), &hm);
+        GetModuleFileNameA(hm, modPath, MAX_PATH);
+        // Replace .dll extension with .ini
+        std::string mp(modPath);
+        auto dot = mp.rfind('.');
+        s_iniPath = (dot != std::string::npos ? mp.substr(0, dot) : mp) + ".ini";
+    }
+
+    auto readStr = [&](const char* key, const char* def) -> std::string {
+        char buf[512] = {};
+        GetPrivateProfileStringA("Dashboard", key, def, buf, sizeof(buf), s_iniPath.c_str());
+        return buf;
+    };
+    auto readInt = [&](const char* key, int def) -> int {
+        return static_cast<int>(GetPrivateProfileIntA("Dashboard", key, def, s_iniPath.c_str()));
+    };
+
+    s_cfg.url         = readStr("URL",    "http://192.168.50.88:8080/");
+    s_cfg.lastPage    = readStr("LastPage", s_cfg.url.c_str());
+    s_cfg.hotKey      = readInt("HotKey",         0x3E);
+    s_cfg.keepBg      = readInt("KeepBackground", 0) != 0;
+    s_cfg.defaultHome = readInt("DefaultHome",    0) != 0;
+    s_cfg.pauseGame   = readInt("PauseGame",      0) != 0;
+
+    logger::info("SkyrimNetDashboard: INI loaded from '{}'", s_iniPath);
+    logger::info("  URL={} HotKey=0x{:02X} keepBg={} defaultHome={} pauseGame={}",
+        s_cfg.url, s_cfg.hotKey, s_cfg.keepBg, s_cfg.defaultHome, s_cfg.pauseGame);
+}
+
+static void SaveSettings()
+{
+    if (s_iniPath.empty()) return;
+    auto ws = [&](const char* k, const std::string& v) {
+        WritePrivateProfileStringA("Dashboard", k, v.c_str(), s_iniPath.c_str());
+    };
+    auto wi = [&](const char* k, int v) {
+        WritePrivateProfileStringA("Dashboard", k, std::to_string(v).c_str(), s_iniPath.c_str());
+    };
+    // URL intentionally not written back (read-only at runtime)
+    wi("Version",       2);
+    ws("LastPage",      s_cfg.lastPage);
+    wi("HotKey",        s_cfg.hotKey);
+    wi("KeepBackground",s_cfg.keepBg      ? 1 : 0);
+    wi("DefaultHome",   s_cfg.defaultHome  ? 1 : 0);
+    wi("PauseGame",     s_cfg.pauseGame    ? 1 : 0);
+    logger::info("SkyrimNetDashboard: settings saved to INI");
+}
+
+static constexpr const char* SKYRIMNET_URL = "http://192.168.50.88:8080/"; // fallback — overridden by INI at startup
 static constexpr uint32_t    ESC_KEY       = 0x01; // Escape
 static constexpr uint32_t    INSPECTOR_KEY = 0x3F; // F5
+static uint32_t              s_toggleKey   = 0x3E; // runtime toggle key, set from s_cfg at startup
 
-static PRISMA_UI_API::IVPrismaUI1* s_PrismaUI = nullptr;
-static PrismaView                  s_View      = 0;
+static PRISMA_UI_API::IVPrismaUI1* s_PrismaUI     = nullptr;
+static PrismaView                  s_View         = 0;
+static KeyHandlerEvent             s_toggleHandle = INVALID_REGISTRATION_HANDLE; // stored so we can re-register on hotkey change
 
 // ── Audio subsystem ───────────────────────────────────────────────────────────
 // Forward declaration — FetchResource is defined after the shell helpers below.
@@ -346,15 +503,16 @@ static void OnToggle()
         // Show, restore visibility state, then focus
         s_PrismaUI->Show(s_View);
         s_PrismaUI->Invoke(s_View, JS_SHOW);
-        [[maybe_unused]] bool focused = s_PrismaUI->Focus(s_View);
+        [[maybe_unused]] bool focused = s_PrismaUI->Focus(s_View, s_cfg.pauseGame);
         logger::info("SkyrimNetDashboard: opened.");
     }
     else if (s_PrismaUI->HasFocus(s_View)) {
-        // Signal hidden, unfocus, hide
+        // Signal hidden, unfocus, optionally hide depending on KeepBackground
         StopAudio();
         s_PrismaUI->Invoke(s_View, JS_HIDE);
         s_PrismaUI->Unfocus(s_View);
-        s_PrismaUI->Hide(s_View);
+        if (!s_cfg.keepBg)
+            s_PrismaUI->Hide(s_View);
         logger::info("SkyrimNetDashboard: closed.");
     }
     else {
@@ -370,7 +528,8 @@ static void OnClose()
         StopAudio();
         s_PrismaUI->Invoke(s_View, JS_HIDE);
         s_PrismaUI->Unfocus(s_View);
-        s_PrismaUI->Hide(s_View);
+        if (!s_cfg.keepBg)
+            s_PrismaUI->Hide(s_View);
         logger::info("SkyrimNetDashboard: closed via ESC.");
     }
 }
@@ -441,12 +600,16 @@ iframe{width:100%;height:100%;border:none;display:block}
       <button class="btn icon" id="RB" title="Refresh"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
     </div>
     <div id="R">
+      <button class="btn" id="ZL" title="Reset zoom" style="font-size:11px;min-width:38px;">100%</button>
+      <button class="btn icon" id="SB" title="Settings"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
       <button class="btn" id="FB"></button>
       <button id="XB"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
   </div>
   <div id="C"><div id="OL"></div><iframe id="snpd-frame" src="/proxy"></iframe></div>
 </div>
+)SHELL"
+    R"SHELL2(
 <script>
 (function(){
   var W=document.getElementById('W'),
@@ -455,9 +618,22 @@ iframe{width:100%;height:100%;border:none;display:block}
       XB=document.getElementById('XB'),
       HB=document.getElementById('HB'),
       RB=document.getElementById('RB'),
+      SB=document.getElementById('SB'),
+      ZL=document.getElementById('ZL'),
       OL=document.getElementById('OL'),
       FR=document.getElementById('snpd-frame');
   var fs=localStorage.getItem('snpd-fs')==='true';
+  var zoom=parseFloat(localStorage.getItem('snpd-zoom')||'1');
+  if(isNaN(zoom)||zoom<0.25||zoom>3)zoom=1;
+  function applyZoom(){
+    FR.style.transformOrigin='top left';
+    FR.style.transform='scale('+zoom+')';
+    FR.style.width=(100/zoom)+'%';
+    FR.style.height=(100/zoom)+'%';
+    ZL.textContent=Math.round(zoom*100)+'%';
+    localStorage.setItem('snpd-zoom',String(zoom));
+  }
+  applyZoom();
   var drag=false,ox=0,oy=0;
   var MAX_SVG='<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
   var MIN_SVG='<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="21" y2="3"/><line x1="3" y1="21" x2="14" y2="10"/></svg>';
@@ -484,6 +660,9 @@ iframe{width:100%;height:100%;border:none;display:block}
     e.stopPropagation();
     fs=!fs;localStorage.setItem('snpd-fs',String(fs));applyFs();
   });
+  B.addEventListener('dblclick',function(e){
+    fs=!fs;localStorage.setItem('snpd-fs',String(fs));applyFs();
+  });
   HB.addEventListener('mousedown',function(e){e.stopPropagation();});
   HB.addEventListener('click',function(e){
     e.stopPropagation();
@@ -493,6 +672,144 @@ iframe{width:100%;height:100%;border:none;display:block}
   RB.addEventListener('click',function(e){
     e.stopPropagation();
     FR.contentWindow.location.reload();
+  });
+  ZL.addEventListener('mousedown',function(e){e.stopPropagation();});
+  ZL.addEventListener('click',function(e){
+    e.stopPropagation();
+    zoom=1;applyZoom();
+  });
+  // Ctrl+Scroll zoom
+  document.addEventListener('wheel',function(e){
+    if(!e.ctrlKey)return;
+    e.preventDefault();
+    var delta=e.deltaY<0?0.1:-0.1;
+    zoom=Math.min(3,Math.max(0.25,Math.round((zoom+delta)*100)/100));
+    applyZoom();
+  },{passive:false});
+  // Ctrl+Plus / Ctrl+Minus / Ctrl+0 keyboard zoom
+  document.addEventListener('keydown',function(e){
+    if(!e.ctrlKey)return;
+    if(e.key==='='||e.key==='+'||e.keyCode===187||e.keyCode===107){
+      e.preventDefault();zoom=Math.min(3,Math.round((zoom+0.1)*100)/100);applyZoom();
+    } else if(e.key==='-'||e.keyCode===189||e.keyCode===109){
+      e.preventDefault();zoom=Math.max(0.25,Math.round((zoom-0.1)*100)/100);applyZoom();
+    } else if(e.key==='0'||e.keyCode===48||e.keyCode===96){
+      e.preventDefault();zoom=1;applyZoom();
+    }
+  },true);
+  // ── Settings modal ──────────────────────────────────────────────────────────
+  var STMO=null; // settings modal overlay element
+  function snpdBuildModal(cfg){
+    var ov=document.createElement('div');
+    ov.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:999999;display:flex;align-items:center;justify-content:center;';
+    var box=document.createElement('div');
+    box.style.cssText='background:#1f2937;border:1px solid #374151;border-radius:8px;padding:24px;min-width:340px;max-width:480px;width:90%;color:#e5e7eb;font-family:Consolas,"Courier New",monospace;font-size:13px;';
+    var title=document.createElement('div');
+    title.style.cssText='font-size:15px;font-weight:700;color:#f9fafb;margin-bottom:16px;border-bottom:1px solid #374151;padding-bottom:10px;';
+    title.textContent='Dashboard Settings';
+    box.appendChild(title);
+    // Hotkey — click-to-capture box
+    var hkRow=document.createElement('div');hkRow.style.cssText='margin-bottom:14px;';
+    var hkLbl=document.createElement('label');hkLbl.style.cssText='display:block;margin-bottom:4px;color:#9ca3af;';hkLbl.textContent='Toggle Hotkey (click box, then press a key)';
+    var hkCode=cfg.hotKey;
+    var dxToName={};(cfg.keys||[]).forEach(function(k){dxToName[k.code]=k.name;});
+    // event.code to DX (modern browsers)
+    var C2D={F1:59,F2:60,F3:61,F4:62,F5:63,F6:64,F7:65,F8:66,F9:67,F10:68,F11:87,F12:88,
+      Digit1:2,Digit2:3,Digit3:4,Digit4:5,Digit5:6,Digit6:7,Digit7:8,Digit8:9,Digit9:10,Digit0:11,
+      KeyQ:16,KeyW:17,KeyE:18,KeyR:19,KeyT:20,KeyY:21,KeyU:22,KeyI:23,KeyO:24,KeyP:25,
+      KeyA:30,KeyS:31,KeyD:32,KeyF:33,KeyG:34,KeyH:35,KeyJ:36,KeyK:37,KeyL:38,
+      KeyZ:44,KeyX:45,KeyC:46,KeyV:47,KeyB:48,KeyN:49,KeyM:50,
+      Backquote:41,Minus:12,Equal:13,BracketLeft:26,BracketRight:27,
+      Semicolon:39,Quote:40,Backslash:86,Comma:51,Period:52,Slash:53,
+      Home:199,Insert:210,Delete:211,PageUp:201,PageDown:209,
+      ArrowUp:200,ArrowDown:208,ArrowLeft:203,ArrowRight:205,
+      Numpad0:82,Numpad1:79,Numpad2:80,Numpad3:81,Numpad4:75,Numpad5:76,
+      Numpad6:77,Numpad7:71,Numpad8:72,Numpad9:73,
+      NumpadAdd:78,NumpadSubtract:74,NumpadMultiply:55,NumpadDivide:181};
+    // event.key to DX (fallback for engines that don\'t populate event.code)
+    var K2D={'F1':59,'F2':60,'F3':61,'F4':62,'F5':63,'F6':64,'F7':65,'F8':66,'F9':67,'F10':68,'F11':87,'F12':88,
+      '1':2,'2':3,'3':4,'4':5,'5':6,'6':7,'7':8,'8':9,'9':10,'0':11,
+      'q':16,'w':17,'e':18,'r':19,'t':20,'y':21,'u':22,'i':23,'o':24,'p':25,
+      'a':30,'s':31,'d':32,'f':33,'g':34,'h':35,'j':36,'k':37,'l':38,
+      'z':44,'x':45,'c':46,'v':47,'b':48,'n':49,'m':50,
+      '`':41,'~':41,'-':12,'_':12,'=':13,'+':13,'[':26,']':27,
+      ';':39,':':39,"'":40,'"':40,'\\':86,'|':86,',':51,'<':51,'.':52,'>':52,'/':53,'?':53,
+      'Insert':210,'Delete':211,'Home':199,'End':207,'PageUp':201,'PageDown':209,
+      'ArrowUp':200,'ArrowDown':208,'ArrowLeft':203,'ArrowRight':205};
+    // event.keyCode to DX (last-resort fallback)
+    var KC2D={112:59,113:60,114:61,115:62,116:63,117:64,118:65,119:66,120:67,121:68,122:87,123:88,
+      49:2,50:3,51:4,52:5,53:6,54:7,55:8,56:9,57:10,48:11,
+      81:16,87:17,69:18,82:19,84:20,89:21,85:22,73:23,79:24,80:25,
+      65:30,83:31,68:32,70:33,71:34,72:35,74:36,75:37,76:38,
+      90:44,88:45,67:46,86:47,66:48,78:49,77:50,
+      96:82,97:79,98:80,99:81,100:75,101:76,102:77,103:71,104:72,105:73,
+      107:78,109:74,106:55,111:181,
+      45:210,46:211,36:199,35:207,33:201,34:209,38:200,40:208,37:203,39:205};
+    var hkBox=document.createElement('div');
+    hkBox.tabIndex=0;
+    hkBox.textContent=dxToName[hkCode]||cfg.hotKeyName||'?';
+    hkBox.style.cssText='width:100%;background:#111827;border:1px solid #374151;border-radius:4px;padding:6px 8px;color:#e5e7eb;cursor:pointer;box-sizing:border-box;user-select:none;outline:none;';
+    function hkKeyDown(e){
+      e.preventDefault();e.stopPropagation();
+      var k=e.key||'';var dx=C2D[e.code]||K2D[k]||K2D[k.toLowerCase()]||KC2D[e.keyCode];
+      if(dx!==undefined)hkCode=dx;
+      hkBox.blur();
+    }
+    hkBox.addEventListener('focus',function(){hkBox.textContent='Press a key\u2026';hkBox.style.borderColor='#10b981';document.addEventListener('keydown',hkKeyDown,true);});
+    hkBox.addEventListener('blur',function(){document.removeEventListener('keydown',hkKeyDown,true);hkBox.textContent=dxToName[hkCode]||('0x'+hkCode.toString(16));hkBox.style.borderColor='#374151';});
+    hkRow.appendChild(hkLbl);hkRow.appendChild(hkBox);
+    box.appendChild(hkRow);
+    // Checkboxes
+    function mkCheck(label,checked){
+      var row=document.createElement('div');row.style.cssText='margin-bottom:10px;display:flex;align-items:center;gap:8px;';
+      var cb=document.createElement('input');cb.type='checkbox';cb.checked=!!checked;cb.style.cssText='width:16px;height:16px;accent-color:#10b981;cursor:pointer;';
+      var lbl=document.createElement('label');lbl.style.cssText='color:#d1d5db;cursor:pointer;';lbl.textContent=label;
+      lbl.addEventListener('click',function(){cb.checked=!cb.checked;});
+      row.appendChild(cb);row.appendChild(lbl);box.appendChild(row);return cb;
+    }
+    var cbKeepBg  =mkCheck('Keep menu open in background (stay rendered while closed)',cfg.keepBg);
+    var cbDefHome =mkCheck('Default to Home page when opening',cfg.defaultHome);
+    var cbPause   =mkCheck('Pause game while open',cfg.pauseGame);
+    // Note
+    var note=document.createElement('div');note.style.cssText='color:#6b7280;font-size:11px;margin-top:4px;margin-bottom:16px;';
+    note.textContent='Settings are saved to the plugin INI file immediately.';
+    box.appendChild(note);
+    // Buttons
+    var btnRow=document.createElement('div');btnRow.style.cssText='display:flex;gap:8px;justify-content:flex-end;';
+    var cancelBtn=document.createElement('button');cancelBtn.textContent='Cancel';
+    cancelBtn.style.cssText='background:#374151;border:1px solid #4b5563;color:#d1d5db;padding:7px 16px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:13px;';
+    var saveBtn=document.createElement('button');saveBtn.textContent='Save';
+    saveBtn.style.cssText='background:#059669;border:none;color:#fff;padding:7px 16px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:600;';
+    cancelBtn.addEventListener('click',function(){if(STMO)document.body.removeChild(STMO);STMO=null;});
+    saveBtn.addEventListener('click',function(){
+      var payload={
+        hotKey:hkCode,
+        keepBg:cbKeepBg.checked,
+        defaultHome:cbDefHome.checked,
+        pauseGame:cbPause.checked
+      };
+      saveBtn.disabled=true;saveBtn.textContent='Saving...';
+      fetch('/settings-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+        .then(function(r){return r.json();})
+        .then(function(j){
+          if(j.saved){if(STMO)document.body.removeChild(STMO);STMO=null;}
+          else{saveBtn.disabled=false;saveBtn.textContent='Save';}
+        })
+        .catch(function(){saveBtn.disabled=false;saveBtn.textContent='Save';});
+    });
+    btnRow.appendChild(cancelBtn);btnRow.appendChild(saveBtn);box.appendChild(btnRow);
+    ov.appendChild(box);
+    ov.addEventListener('mousedown',function(e){e.stopPropagation();});
+    return ov;
+  }
+  SB.addEventListener('mousedown',function(e){e.stopPropagation();});
+  SB.addEventListener('click',function(e){
+    e.stopPropagation();
+    if(STMO){document.body.removeChild(STMO);STMO=null;return;}
+    fetch('/settings-get')
+      .then(function(r){return r.json();})
+      .then(function(cfg){STMO=snpdBuildModal(cfg);document.body.appendChild(STMO);})
+      .catch(function(err){console.error('snpd settings-get failed',err);});
   });
   XB.addEventListener('mousedown',function(e){e.stopPropagation();});
   XB.addEventListener('click',function(e){
@@ -515,12 +832,6 @@ iframe{width:100%;height:100%;border:none;display:block}
     drag=false;OL.style.display='none';B.style.cursor='grab';
     localStorage.setItem('snpd-x',W.style.left);localStorage.setItem('snpd-y',W.style.top);
   });
-  document.addEventListener('keydown',function(e){
-    if(e.key==='F4'||e.keyCode===115){
-      e.preventDefault();
-      try{if(typeof window.closeDashboard==='function')window.closeDashboard('');}catch(_){}
-    }
-  },true);
   window.confirm=function(){return true;};
   window.alert=function(){};
   window.prompt=function(m,d){return d!==undefined?d:'';}
@@ -528,7 +839,7 @@ iframe{width:100%;height:100%;border:none;display:block}
   // Ultralight may route iframe dialogs through the top-level window context,
   // so overriding here catches those cases too.
   var snpdFr=FR;
-  function snpdPatch(){try{var cw=snpdFr.contentWindow;if(!cw)return;cw.confirm=function(){return true;};cw.alert=function(){};cw.prompt=function(m,d){return d!==undefined?d:'';};cw.open=function(url){if(url)cw.location.href=url;return cw;};}catch(_){}}
+  function snpdPatch(){try{var cw=snpdFr.contentWindow;if(!cw)return;cw.confirm=function(){return true;};cw.alert=function(){};cw.prompt=function(m,d){return d!==undefined?d:'';};cw.open=function(url){if(url)cw.location.href=url;return cw;};cw.document.addEventListener('wheel',function(e){if(!e.ctrlKey)return;e.preventDefault();e.stopPropagation();var delta=e.deltaY<0?0.1:-0.1;zoom=Math.min(3,Math.max(0.25,Math.round((zoom+delta)*100)/100));applyZoom();},{passive:false,capture:true});}catch(_){}}
   snpdFr.addEventListener('load',snpdPatch);
   // C++ Invoke() runs in this (shell) frame -- bridge __onAudioEnded into the same-origin iframe.
   window.__onAudioEnded=function(){try{var cw=snpdFr.contentWindow;if(cw&&cw.__onAudioEnded)cw.__onAudioEnded();}catch(_){}};
@@ -570,7 +881,7 @@ iframe{width:100%;height:100%;border:none;display:block}
 </script>
 </body>
 </html>
-)SHELL";
+)SHELL2";
 
     return html;
 }
@@ -614,9 +925,16 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
         return {"", "text/plain", 503};
 
     sockaddr_in addr{};
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(port);
-    addr.sin_addr.s_addr = inet_addr(host.c_str());
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    // inet_addr only handles dotted-decimal; resolve hostnames (e.g. "localhost") via gethostbyname
+    auto ipAddr = inet_addr(host.c_str());
+    if (ipAddr == INADDR_NONE) {
+        struct hostent* he = gethostbyname(host.c_str());
+        if (!he) { closesocket(s); return {"", "text/plain", 503}; }
+        ipAddr = *reinterpret_cast<u_long*>(he->h_addr_list[0]);
+    }
+    addr.sin_addr.s_addr = ipAddr;
 
     if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
         closesocket(s);
@@ -1381,6 +1699,64 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     logger::warn("SkyrimNetDashboard: /save-file failed to write '{}'", savePath);
                 }
                 contentType = "application/json";
+            } else if (path == "/settings-get") {
+                body        = SettingsToJson();
+                contentType = "application/json";
+            } else if (path == "/settings-save") {
+                // Minimal JSON field extractor — no full parser needed
+                auto extractStr = [&](const std::string& key) -> std::string {
+                    auto needle = '"' + key + "\":\""; // "key":"..."
+                    auto pos = reqBody.find(needle);
+                    if (pos == std::string::npos) return "";
+                    pos += needle.size();
+                    auto end = reqBody.find('"', pos);
+                    return end == std::string::npos ? "" : reqBody.substr(pos, end - pos);
+                };
+                auto extractInt = [&](const std::string& key, int def) -> int {
+                    auto needle = '"' + key + "\":";
+                    auto pos = reqBody.find(needle);
+                    if (pos == std::string::npos) return def;
+                    pos += needle.size();
+                    while (pos < reqBody.size() && (reqBody[pos]==' '||reqBody[pos]=='\t')) ++pos;
+                    if (pos >= reqBody.size()) return def;
+                    bool neg = (reqBody[pos] == '-');
+                    if (neg) ++pos;
+                    int val = 0; bool got = false;
+                    while (pos < reqBody.size() && reqBody[pos] >= '0' && reqBody[pos] <= '9') {
+                        val = val*10 + (reqBody[pos++]-'0'); got = true; }
+                    return got ? (neg ? -val : val) : def;
+                };
+                auto extractBool = [&](const std::string& key, bool def) -> bool {
+                    auto needle = '"' + key + "\":";
+                    auto pos = reqBody.find(needle);
+                    if (pos == std::string::npos) return def;
+                    pos += needle.size();
+                    while (pos < reqBody.size() && (reqBody[pos]==' '||reqBody[pos]=='\t')) ++pos;
+                    if (reqBody.substr(pos, 4) == "true")  return true;
+                    if (reqBody.substr(pos, 5) == "false") return false;
+                    return def;
+                };
+                int  newHotKey    = extractInt("hotKey",    s_cfg.hotKey);
+                bool newKeepBg    = extractBool("keepBg",    s_cfg.keepBg);
+                bool newDefHome   = extractBool("defaultHome", s_cfg.defaultHome);
+                bool newPause     = extractBool("pauseGame", s_cfg.pauseGame);
+                // Re-register hotkey if it changed
+                if (newHotKey != static_cast<int>(s_toggleKey) && newHotKey > 0) {
+                    auto* kh = KeyHandler::GetSingleton();
+                    if (s_toggleHandle != INVALID_REGISTRATION_HANDLE)
+                        kh->Unregister(s_toggleHandle);
+                    s_toggleKey    = static_cast<uint32_t>(newHotKey);
+                    s_toggleHandle = kh->Register(s_toggleKey, KeyEventType::KEY_DOWN, OnToggle);
+                    logger::info("SkyrimNetDashboard: hotkey changed to {} (0x{:02X})",
+                        DxKeyName(s_toggleKey), s_toggleKey);
+                }
+                s_cfg.hotKey      = newHotKey;
+                s_cfg.keepBg      = newKeepBg;
+                s_cfg.defaultHome = newDefHome;
+                s_cfg.pauseGame   = newPause;
+                SaveSettings();
+                body        = "{\"saved\":true}";
+                contentType = "application/json";
             } else if (path == "/audio-raw") {
                 // Binary audio endpoint — used for blob: URLs (e.g. TTS).
                 // JS fetches the blob and POSTs raw bytes here with the correct Content-Type.
@@ -1488,7 +1864,10 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
         return;
     }
 
-    // 1. Get PrismaUI API
+    // 1. Load settings from INI
+    LoadSettings();
+
+    // 2. Get PrismaUI API
     s_PrismaUI = static_cast<PRISMA_UI_API::IVPrismaUI1*>(
         PRISMA_UI_API::RequestPluginAPI(PRISMA_UI_API::InterfaceVersion::V1));
 
@@ -1499,7 +1878,7 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
 
     // 2. Parse the SkyrimNet server address for the audio subsystem
     {
-        std::string u = SKYRIMNET_URL;
+        std::string u = s_cfg.url;
         if (u.size() > 7 && u.substr(0, 7) == "http://") u = u.substr(7);
         auto col = u.find(':');
         auto sl  = u.find('/');
@@ -1516,7 +1895,9 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
 
     // 3. Build the chrome shell page and start the local HTTP server
     std::string shellHtml = BuildShellHtml();
-    uint16_t    port      = StartShellServer(shellHtml, SKYRIMNET_URL);
+    std::string startUrl  = (s_cfg.defaultHome || s_cfg.lastPage.empty())
+                            ? s_cfg.url : s_cfg.lastPage;
+    uint16_t    port      = StartShellServer(shellHtml, startUrl);
     if (port == 0) {
         logger::critical("SkyrimNetDashboard: Failed to start shell server.");
         return;
@@ -1526,23 +1907,24 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     // 3. Create a view that loads the shell page (chrome + iframe pointing at SkyrimNet)
     s_View = s_PrismaUI->CreateView(shellUrl.c_str(), OnDomReady);
     s_PrismaUI->SetScrollingPixelSize(s_View, 120);
-    s_PrismaUI->Hide(s_View); // Start hidden until the user opens it
+    if (!s_cfg.keepBg)
+        s_PrismaUI->Hide(s_View); // Start hidden unless KeepBackground=1
 
     // Close button in the HTML calls window.closeDashboard('') — wire it to OnToggle
     s_PrismaUI->RegisterJSListener(s_View, "closeDashboard", [](const char*) { OnToggle(); });
 
-    logger::info("SkyrimNetDashboard: Shell view created at {} (iframe -> {})", shellUrl, SKYRIMNET_URL);
+    logger::info("SkyrimNetDashboard: Shell view created at {} (iframe -> {})", shellUrl, startUrl);
 
-    // 3. Register F4 hotkey to toggle the overlay
+    // 3. Register hotkey to toggle the overlay
+    s_toggleKey    = static_cast<uint32_t>(s_cfg.hotKey);
     KeyHandler::RegisterSink();
-    [[maybe_unused]] auto toggleHandle = KeyHandler::GetSingleton()->Register(
-        TOGGLE_KEY, KeyEventType::KEY_DOWN, OnToggle);
+    s_toggleHandle = KeyHandler::GetSingleton()->Register(
+        s_toggleKey, KeyEventType::KEY_DOWN, OnToggle);
     [[maybe_unused]] auto escHandle = KeyHandler::GetSingleton()->Register(
         ESC_KEY, KeyEventType::KEY_DOWN, OnClose);
-    [[maybe_unused]] auto inspectorHandle = KeyHandler::GetSingleton()->Register(
-        INSPECTOR_KEY, KeyEventType::KEY_DOWN, OnToggleInspector);
 
-    logger::info("SkyrimNetDashboard: Ready. F4 = open/close, F5 = toggle inspector.");
+    logger::info("SkyrimNetDashboard: Ready. {} = open/close.",
+        DxKeyName(s_toggleKey));
 }
 
 extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface* a_skse, SKSE::PluginInfo* a_info)
