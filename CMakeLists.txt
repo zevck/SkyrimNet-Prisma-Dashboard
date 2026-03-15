@@ -49,6 +49,7 @@ target_link_libraries(
         CommonLibSSE::CommonLibSSE
         ws2_32
         winmm
+        comdlg32
 )
 
 # ---- Installation ----

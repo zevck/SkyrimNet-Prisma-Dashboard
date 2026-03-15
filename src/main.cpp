@@ -21,6 +21,27 @@ static PrismaView                  s_View      = 0;
 
 // ── Audio subsystem ───────────────────────────────────────────────────────────
 // Forward declaration — FetchResource is defined after the shell helpers below.
+
+// Decode a percent-encoded URL component (e.g. from query strings).
+static std::string UrlDecode(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            char hex[3] = { s[i+1], s[i+2], 0 };
+            char* end = nullptr;
+            out += static_cast<char>(std::strtol(hex, &end, 16));
+            i += 2;
+        } else if (s[i] == '+') {
+            out += ' ';
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
 // Default arguments live here so callers above don't need to pass them explicitly.
 static std::tuple<std::string,std::string,int>
 FetchResource(const std::string& host, uint16_t port, const std::string& method,
@@ -953,6 +974,45 @@ static std::string PatchCSS(std::string body)
 
 static std::string PatchBundle(std::string body)
 {
+    // ── Log file download fix ─────────────────────────────────────────────────
+    // The app's download handler creates a blob: URL then calls a.click() to
+    // trigger a browser Save-As dialog. Ultralight doesn't support <a download>
+    // and just navigates the frame to the blob URL, showing raw text.
+    // We replace the anchor trick entirely: read the blob as an ArrayBuffer and
+    // POST it directly to our /save-file proxy endpoint, which writes the file
+    // to Documents\SkyrimNet Logs\ and returns JSON {saved,path}.  A toast
+    // shows the saved path — no navigation ever happens.
+    {
+        static const std::string dlNeedle =
+            "const s=await t.blob(),r=window.URL.createObjectURL(s),a=document.createElement(\"a\");a.href=r,a.download=e,document.body.appendChild(a),a.click(),window.URL.revokeObjectURL(r),document.body.removeChild(a)";
+        static const std::string dlReplace =
+            "const s=await t.blob();"
+            "await(async function(){"
+            "try{"
+            // First ask C++ to open a native Save-As dialog
+            "const dr=await fetch('/save-dialog?name='+encodeURIComponent(e));"
+            "const dj=await dr.json();"
+            "if(dj.cancelled)return;"
+            // User chose a path — POST the bytes there
+            "const ab=await s.arrayBuffer();"
+            "const jr=await fetch('/save-file?path='+encodeURIComponent(dj.path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:ab});"
+            "const j=await jr.json();"
+            "const d=document.createElement('div');"
+            "d.style.cssText='position:fixed;bottom:20px;right:20px;z-index:2147483647;padding:10px 16px;border-radius:6px;font-size:12px;font-family:Consolas,monospace;color:#fff;pointer-events:none;max-width:420px;word-break:break-all;transition:opacity 0.4s;'+(j&&j.saved?'background:#16a34a;border:1px solid #15803d;':'background:#dc2626;border:1px solid #b91c1c;');"
+            "d.textContent=j&&j.saved?'\\u2713 Saved: '+(j.path||e):'Save failed: '+(j.error||'unknown');"
+            "document.body.appendChild(d);"
+            "setTimeout(function(){d.style.opacity='0';setTimeout(function(){d.remove();},500);},3500);"
+            "}catch(err){console.error('snpd save-file failed',err);}"
+            "})()";
+        auto p = body.find(dlNeedle);
+        if (p != std::string::npos) {
+            body.replace(p, dlNeedle.size(), dlReplace);
+            logger::info("SkyrimNetDashboard: PatchBundle: patched log download anchor");
+        } else {
+            logger::warn("SkyrimNetDashboard: PatchBundle: log download anchor needle not found");
+        }
+    }
+
     // CodeMirror updateListener fires onChange(text) every keystroke via setTimeout(fn,0).
     // Patch: use a module-scoped timer variable (_snpdCmTmr) for a 600ms debounce.
     static const std::string needle =
@@ -1154,6 +1214,108 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 OnAudioMessage(reqBody.c_str());
                 body        = "ok";
                 contentType = "text/plain";
+            } else if (path.substr(0, 12) == "/save-dialog") {
+                // Opens a native Windows Save-As dialog on the game thread and
+                // returns JSON {"path":"..."}  or  {"cancelled":true}.
+                // The ?name= query param sets the suggested filename.
+                std::string suggestName = "download.bin";
+                {
+                    auto qp = path.find('?');
+                    if (qp != std::string::npos) {
+                        std::string q = path.substr(qp + 1);
+                        auto np = q.find("name=");
+                        if (np != std::string::npos)
+                            suggestName = UrlDecode(q.substr(np + 5));
+                    }
+                }
+                // Sanitise display name (strip dirs but keep extension)
+                {
+                    auto sl = suggestName.find_last_of("/\\");
+                    if (sl != std::string::npos) suggestName = suggestName.substr(sl + 1);
+                }
+                {
+                    char fileBuf[MAX_PATH] = {};
+                    // suggestName may be up to MAX_PATH-1 chars; copy safely
+                    strncpy_s(fileBuf, suggestName.c_str(), _TRUNCATE);
+
+                    // Build initial directory: Documents folder
+                    std::string initDir;
+                    {
+                        char* up = nullptr; std::size_t len = 0;
+                        _dupenv_s(&up, &len, "USERPROFILE");
+                        initDir = (up ? std::string(up) : "C:\\Users\\Default") + "\\Documents";
+                        if (up) free(up);
+                    }
+
+                    OPENFILENAMEA ofn = {};
+                    ofn.lStructSize  = sizeof(ofn);
+                    ofn.hwndOwner    = nullptr;   // no parent HWND
+                    ofn.lpstrFilter  = "All Files\0*.*\0Log Files\0*.log\0Text Files\0*.txt\0";
+                    ofn.nFilterIndex = 1;
+                    ofn.lpstrFile    = fileBuf;
+                    ofn.nMaxFile     = MAX_PATH;
+                    ofn.lpstrInitialDir = initDir.c_str();
+                    ofn.lpstrTitle   = "Save log file";
+                    ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+
+                    if (GetSaveFileNameA(&ofn)) {
+                        std::string jsonPath;
+                        for (char c : std::string(fileBuf))
+                            if (c == '\\') jsonPath += "\\\\"; else jsonPath += c;
+                        body = "{\"path\":\"" + jsonPath + "\"}";
+                    } else {
+                        body = "{\"cancelled\":true}";
+                    }
+                }
+                contentType = "application/json";
+            } else if (path.substr(0, 10) == "/save-file") {
+                // Receives binary file content as POST body and writes it to disk.
+                // Accepts either:
+                //   ?path=<full-encoded-path>  (from /save-dialog)
+                //   ?name=<filename>           (falls back to Documents\SkyrimNet Logs\)
+                std::string savePath;
+                {
+                    auto qPos = path.find('?');
+                    if (qPos != std::string::npos) {
+                        std::string query = path.substr(qPos + 1);
+                        auto pathPos = query.find("path=");
+                        auto namePos = query.find("name=");
+                        if (pathPos != std::string::npos) {
+                            // Full path supplied by the save dialog
+                            savePath = UrlDecode(query.substr(pathPos + 5));
+                        } else if (namePos != std::string::npos) {
+                            std::string fname = UrlDecode(query.substr(namePos + 5));
+                            // Strip path components and dangerous chars from bare filename
+                            auto sl = fname.find_last_of("/\\");
+                            if (sl != std::string::npos) fname = fname.substr(sl + 1);
+                            for (auto& c : fname)
+                                if (c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+                                    c = '_';
+                            if (fname.empty()) fname = "download.bin";
+                            char* up = nullptr; std::size_t len = 0;
+                            _dupenv_s(&up, &len, "USERPROFILE");
+                            std::string dir = (up ? std::string(up) : "C:\\Users\\Default") + "\\Documents\\SkyrimNet Logs";
+                            if (up) free(up);
+                            CreateDirectoryA(dir.c_str(), nullptr);
+                            savePath = dir + "\\" + fname;
+                        }
+                    }
+                    if (savePath.empty()) savePath = "download.bin";
+                }
+                std::ofstream ofs(savePath, std::ios::binary);
+                if (ofs) {
+                    ofs.write(reqBody.data(), static_cast<std::streamsize>(reqBody.size()));
+                    ofs.close();
+                    std::string jsonPath;
+                    for (auto c : savePath)
+                        if (c == '\\') jsonPath += "\\\\"; else jsonPath += c;
+                    body = "{\"saved\":true,\"path\":\"" + jsonPath + "\"}";
+                    logger::info("SkyrimNetDashboard: saved file '{}' ({} bytes)", savePath, reqBody.size());
+                } else {
+                    body = "{\"saved\":false,\"error\":\"Could not write file\"}";
+                    logger::warn("SkyrimNetDashboard: /save-file failed to write '{}'", savePath);
+                }
+                contentType = "application/json";
             } else if (path == "/audio-raw") {
                 // Binary audio endpoint — used for blob: URLs (e.g. TTS).
                 // JS fetches the blob and POSTs raw bytes here with the correct Content-Type.
