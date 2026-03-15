@@ -22,7 +22,7 @@ static PrismaView                  s_View      = 0;
 // ── Audio subsystem ───────────────────────────────────────────────────────────
 // Forward declaration — FetchResource is defined after the shell helpers below.
 // Default arguments live here so callers above don't need to pass them explicitly.
-static std::pair<std::string,std::string>
+static std::tuple<std::string,std::string,int>
 FetchResource(const std::string& host, uint16_t port, const std::string& method,
               const std::string& path, const std::string& reqContentType = "",
               const std::string& reqBody = "");
@@ -223,7 +223,8 @@ static void PlayAudioUrl(std::string url)
             return;
         }
 
-        auto [bytes, ct] = FetchResource(host, port, "GET", path);
+        auto [bytes, ct, audioSc] = FetchResource(host, port, "GET", path);
+        (void)audioSc;
         logger::info("SkyrimNetDashboard: audio fetch -> {} bytes, content-type='{}'", bytes.size(), ct);
         if (bytes.empty()) {
             logger::warn("SkyrimNetDashboard: audio fetch returned empty body, aborting");
@@ -581,15 +582,15 @@ static std::string ContentTypeFromPath(const std::string& path)
     return "application/octet-stream";
 }
 
-// Proxy an arbitrary request to host:port.  Forwards method + body; returns {responseBody, contentType}.
-static std::pair<std::string,std::string>
+// Proxy an arbitrary request to host:port.  Forwards method + body; returns {responseBody, contentType, statusCode}.
+static std::tuple<std::string,std::string,int>
 FetchResource(const std::string& host, uint16_t port, const std::string& method,
               const std::string& path, const std::string& reqContentType,
               const std::string& reqBody)
 {
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET)
-        return {"", "text/plain"};
+        return {"", "text/plain", 503};
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
@@ -598,12 +599,20 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
 
     if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
         closesocket(s);
-        return {"", "text/plain"};
+        return {"", "text/plain", 503};
     }
 
     // Use HTTP/1.1 + Connection: close so the server streams freely but closes when done.
     std::string req = method + " " + path + " HTTP/1.1\r\nHost: " + host + "\r\n";
-    if (!reqBody.empty()) {
+    // Always include Content-Type and Content-Length for non-GET requests so that
+    // the upstream server can correctly identify the request as a JSON API call,
+    // even when the body is empty (e.g. "reload from disk" sends POST with no body).
+    const bool hasBody = method != "GET" && method != "HEAD";
+    if (hasBody) {
+        std::string ct = reqContentType.empty() ? "application/json" : reqContentType;
+        req += "Content-Type: " + ct + "\r\n";
+        req += "Content-Length: " + std::to_string(reqBody.size()) + "\r\n";
+    } else if (!reqBody.empty()) {
         if (!reqContentType.empty())
             req += "Content-Type: " + reqContentType + "\r\n";
         req += "Content-Length: " + std::to_string(reqBody.size()) + "\r\n";
@@ -622,6 +631,15 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
     // Separate headers from body
     auto sep = response.find("\r\n\r\n");
     std::string rawBody = (sep != std::string::npos) ? response.substr(sep + 4) : response;
+
+    // Extract HTTP status code from response line (e.g. "HTTP/1.1 200 OK")
+    int statusCode = 200;
+    {
+        auto sp1 = response.find(' ');
+        auto sp2 = response.find(' ', sp1 + 1);
+        if (sp1 != std::string::npos && sp2 != std::string::npos)
+            try { statusCode = std::stoi(response.substr(sp1 + 1, sp2 - sp1 - 1)); } catch (...) {}
+    }
 
     // Extract Content-Type and Transfer-Encoding from response headers
     std::string ct = ContentTypeFromPath(path);
@@ -663,7 +681,7 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
         body = std::move(rawBody);
     }
 
-    return {body, ct};
+    return {body, ct, statusCode};
 }
 
 // Injects compat patches (confirm/alert/prompt/open) and a fast-typing
@@ -976,7 +994,8 @@ static std::string PatchBundle(std::string body)
 // Fetches the SkyrimNet root HTML and injects compat patches.
 static std::string FetchAndInject(const std::string& host, uint16_t port)
 {
-    auto [body, ct] = FetchResource(host, port, "GET", "/");
+    auto [body, ct, sc] = FetchResource(host, port, "GET", "/");
+    (void)sc;
     if (body.empty())
         return "<html><body>Proxy error: could not fetch dashboard from " +
                host + ":" + std::to_string(port) + "</body></html>";
@@ -1124,6 +1143,7 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
 
             std::string body;
             std::string contentType = "text/html; charset=utf-8";
+            int upstreamStatus = 200;
 
             if (path == "/shell" || path.empty()) {
                 body = shellHtml;
@@ -1156,15 +1176,28 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     }
                 }
                 if (!fromCache) {
-                    auto [resBody, resCt] = FetchResource(proxyHost, proxyPort, method, path, reqCT, reqBody);
+                    auto [resBody, resCt, resSc] = FetchResource(proxyHost, proxyPort, method, path, reqCT, reqBody);
                     body        = std::move(resBody);
                     contentType = std::move(resCt);
+                    upstreamStatus = resSc;
                     if (contentType.find("text/html") != std::string::npos && !body.empty())
                         body = InjectPatches(std::move(body));
                     else if (contentType.find("javascript") != std::string::npos && !body.empty())
                         body = PatchBundle(std::move(body));
                     else if (contentType.find("text/css") != std::string::npos && !body.empty())
                         body = PatchCSS(std::move(body));
+                    // For API calls (non-GET): if the body is empty and upstream
+                    // returned a 2xx success, serve '{}' so axios JSON.parse
+                    // doesn't blow up on an empty string (WebKit throws
+                    // SyntaxError: "The string did not match the expected pattern.").
+                    // We also force the status to 200 because HTTP 204 MUST NOT
+                    // carry a body — Ultralight would discard it and we'd be back
+                    // to JSON.parse("") throwing the same error.
+                    if (method != "GET" && body.empty() && resSc >= 200 && resSc < 300) {
+                        body           = "{}";
+                        contentType    = "application/json";
+                        upstreamStatus = 200;   // promote 204→200 so the body is delivered
+                    }
                     // Cache immutable assets (content-hashed JS/CSS, fonts, images)
                     if (method == "GET" && !body.empty() && IsImmutableAsset(contentType, path)) {
                         std::lock_guard<std::mutex> lk(s_cacheMtx);
@@ -1181,8 +1214,15 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 ? "max-age=31536000, immutable"
                 : "no-store";
 
+            // Forward the upstream HTTP status code so axios error handling works
+            // correctly (e.g. 4xx → onError, 2xx → onSuccess).
+            std::string statusLine = "HTTP/1.1 200 OK";
+            if (upstreamStatus == 201) statusLine = "HTTP/1.1 201 Created";
+            else if (upstreamStatus == 204) statusLine = "HTTP/1.1 204 No Content";
+            else if (upstreamStatus >= 400 && upstreamStatus < 500) statusLine = "HTTP/1.1 " + std::to_string(upstreamStatus) + " Client Error";
+            else if (upstreamStatus >= 500) statusLine = "HTTP/1.1 " + std::to_string(upstreamStatus) + " Server Error";
             std::string resp =
-                "HTTP/1.1 200 OK\r\n"
+                statusLine + "\r\n"
                 "Content-Type: " + contentType + "\r\n"
                 "Content-Length: " + std::to_string(body.size()) + "\r\n"
                 "Cache-Control: " + cacheControl + "\r\n"
