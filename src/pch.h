@@ -18,6 +18,12 @@
 #include <unordered_map>
 #include <mmsystem.h>
 #include <commdlg.h>
+// Media Foundation — used to transcode MP3/AAC → PCM WAV so we never need the
+// DirectShow-backed mpegvideo MCI driver (which deadlocks on game threads).
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
+#include <mferror.h>
 #pragma warning(pop)
 
 using namespace std::literals;

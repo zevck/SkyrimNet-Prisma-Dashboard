@@ -209,7 +209,8 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
 static std::string s_audioHost;
 static uint16_t    s_audioPort = 8080;
 
-// Simple JSON string-field extractor for our own controlled JSON payloads.
+// Simple JSON field extractor for our own controlled JSON payloads.
+// Handles both quoted strings ("value") and unquoted numbers/booleans.
 static std::string AudioJsonField(const char* json, const char* key)
 {
     if (!json || !key) return {};
@@ -218,15 +219,27 @@ static std::string AudioJsonField(const char* json, const char* key)
     if (pos == std::string::npos) return {};
     pos = j.find(':', pos + k.size());
     if (pos == std::string::npos) return {};
-    pos = j.find('"', pos + 1);
-    if (pos == std::string::npos) return {};
+    // Skip whitespace after ':'
     ++pos;
-    std::string val;
-    while (pos < j.size() && j[pos] != '"') {
-        if (j[pos] == '\\' && pos + 1 < j.size()) { ++pos; }
-        val += j[pos++];
+    while (pos < j.size() && (j[pos] == ' ' || j[pos] == '\t')) ++pos;
+    if (pos >= j.size()) return {};
+    if (j[pos] == '"') {
+        // Quoted string value
+        ++pos;
+        std::string val;
+        while (pos < j.size() && j[pos] != '"') {
+            if (j[pos] == '\\' && pos + 1 < j.size()) { ++pos; }
+            val += j[pos++];
+        }
+        return val;
+    } else {
+        // Unquoted value (number, boolean, null) — read until delimiter
+        std::string val;
+        while (pos < j.size() && j[pos] != ',' && j[pos] != '}' && j[pos] != ' ' && j[pos] != '\r' && j[pos] != '\n') {
+            val += j[pos++];
+        }
+        return val;
     }
-    return val;
 }
 
 // Resolve an audio src URL to (host, port, path) for our FetchResource helper.
@@ -264,14 +277,170 @@ AudioParseUrl(const std::string& url)
 static std::mutex  s_wavBufMtx;
 static std::string s_wavBuf;
 
+// Monotonically-increasing generation stamp: each PlayAudioBytes call claims a slot
+// before stopping the previous segment.  Only the latest generation fires
+// __onAudioEnded; a pre-empted segment's thread will see a mismatch and skip it.
+// StopAudio() also bumps the stamp so playback fired by UI close/toggle is cancelled.
+static std::atomic<uint32_t> s_audioGen{0};
+
+// Serialises all MCI open/play/close operations so concurrent PlayAudioBytes calls
+// can't step on the shared "snpd" device alias.  Also protects s_hwo/s_hwoHdr.
+static std::mutex s_mciMtx;
+
+// waveOut handle used for in-memory PCM WAV playback (no temp file).
+// Protected by s_mciMtx.  Non-null while a segment is playing or has been
+// reset-but-not-yet-closed by PauseAudioQueue/ClearAudioQueue.
+static HWAVEOUT s_hwo    = nullptr;
+static WAVEHDR  s_hwoHdr = {};
+
+// ── Streaming audio queue ─────────────────────────────────────────────────────
+// TryStreamProxy decodes base64 WAV segments from the TTS NDJSON stream in C++
+// and pushes them here so the expensive JS P() function (atob + new Array(N))
+// never has to run — eliminating the per-segment 150-200 ms stall that blocks
+// D3DPresent via ultralightFuture.get().  Segments play sequentially; the queue
+// runner fires __onAudioEnded after each one to advance SkyrimNet's JS queue.
+static std::mutex              s_aqMtx;
+static std::condition_variable s_aqCv;
+static std::deque<std::string> s_aqPending;  // WAV byte strings
+static std::atomic<bool>       s_aqRunning{false};
+static std::atomic<bool>       s_aqPaused{false};
+
 static void StopAudio()
 {
-    // Stop in-memory WAV playback (PlaySound is synchronous when called with NULL).
-    PlaySound(nullptr, nullptr, 0);
-    // Stop/close MCI in case an MP3 is playing via the fallback path.
-    mciSendStringA("stop snpd wait", nullptr, 0, nullptr);
-    mciSendStringA("close snpd wait", nullptr, 0, nullptr);
+    ++s_audioGen; // invalidate any polling thread so it won't fire __onAudioEnded
+    {
+        std::lock_guard<std::mutex> lk(s_mciMtx);
+        if (s_hwo) waveOutReset(s_hwo); // immediately marks buffer DONE so poll exits
+        mciSendStringA("stop snpd wait", nullptr, 0, nullptr);
+        mciSendStringA("close snpd wait", nullptr, 0, nullptr);
+    }
     logger::info("SkyrimNetDashboard: audio stopped.");
+}
+
+// Transcodes any audio file that Media Foundation can read (MP3, AAC, WMA, …)
+// into a 16-bit PCM WAV file at dstPath.  Returns true on success.
+// This lets us play everything via the waveaudio MCI driver and avoid the
+// DirectShow-backed mpegvideo driver entirely (mpegvideo's mciSendStringA calls
+// post Win32 messages to the game thread, which never pumps them → freeze).
+static bool TranscodeToWav(const std::wstring& srcPath, const std::wstring& dstPath)
+{
+    // MFStartup is called once at plugin load; do not call it here.
+    // Each background thread that uses MF must initialize COM first.
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED); // idempotent if already inited
+    struct ComGuard { ~ComGuard() { CoUninitialize(); } } _cg;
+
+    // ── Source reader ──────────────────────────────────────────────────────
+    IMFSourceReader* pReader = nullptr;
+    if (FAILED(MFCreateSourceReaderFromURL(srcPath.c_str(), nullptr, &pReader)))
+        return false;
+
+    // Tell MF to decode the first audio stream to uncompressed PCM.
+    IMFMediaType* pType = nullptr;
+    MFCreateMediaType(&pType);
+    pType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    pType->SetGUID(MF_MT_SUBTYPE,    MFAudioFormat_PCM);
+    pReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pType);
+    pType->Release();
+
+    // Retrieve the actual output format so we can write the WAV header.
+    IMFMediaType* pOutType = nullptr;
+    if (FAILED(pReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &pOutType))) {
+        pReader->Release(); return false;
+    }
+    UINT32 channels = 0, sampleRate = 0, bitsPerSample = 0;
+    pOutType->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS,           &channels);
+    pOutType->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND,     &sampleRate);
+    pOutType->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE,        &bitsPerSample);
+    pOutType->Release();
+
+    if (!channels || !sampleRate || !bitsPerSample) { pReader->Release(); return false; }
+
+    // ── Collect PCM samples ────────────────────────────────────────────────
+    std::string pcm;
+    pcm.reserve(sampleRate * channels * (bitsPerSample / 8) * 10); // ~10s pre-alloc
+
+    for (;;) {
+        DWORD flags = 0;
+        IMFSample* pSample = nullptr;
+        HRESULT hr = pReader->ReadSample(
+            MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, nullptr, &flags, nullptr, &pSample);
+        if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
+            if (pSample) pSample->Release();
+            break;
+        }
+        if (!pSample) continue;
+
+        IMFMediaBuffer* pBuf = nullptr;
+        if (SUCCEEDED(pSample->ConvertToContiguousBuffer(&pBuf))) {
+            BYTE* pData = nullptr; DWORD len = 0;
+            if (SUCCEEDED(pBuf->Lock(&pData, nullptr, &len))) {
+                pcm.append(reinterpret_cast<char*>(pData), len);
+                pBuf->Unlock();
+            }
+            pBuf->Release();
+        }
+        pSample->Release();
+    }
+    pReader->Release();
+
+    if (pcm.empty()) return false;
+
+    // ── Write WAV file ─────────────────────────────────────────────────────
+    std::ofstream ofs(dstPath, std::ios::binary);
+    if (!ofs) return false;
+
+    uint32_t byteRate    = sampleRate * channels * (bitsPerSample / 8);
+    uint16_t blockAlign  = static_cast<uint16_t>(channels * (bitsPerSample / 8));
+    uint32_t dataSize    = static_cast<uint32_t>(pcm.size());
+    uint32_t riffSize    = 36 + dataSize;
+
+    auto w16 = [&](uint16_t v) { ofs.write(reinterpret_cast<char*>(&v), 2); };
+    auto w32 = [&](uint32_t v) { ofs.write(reinterpret_cast<char*>(&v), 4); };
+
+    ofs.write("RIFF", 4); w32(riffSize);
+    ofs.write("WAVE", 4);
+    ofs.write("fmt ", 4); w32(16);
+    w16(1); // PCM
+    w16(static_cast<uint16_t>(channels));
+    w32(sampleRate);
+    w32(byteRate);
+    w16(blockAlign);
+    w16(static_cast<uint16_t>(bitsPerSample));
+    ofs.write("data", 4); w32(dataSize);
+    ofs.write(pcm.data(), static_cast<std::streamsize>(pcm.size()));
+    return true;
+}
+
+// Parses a PCM WAV byte buffer and returns the WAVEFORMATEX descriptor and the
+// byte range of the 'data' chunk.  Returns valid=false if the format is not
+// plain PCM (fmt tag != 1) or the header is malformed.
+struct WavInfo { WAVEFORMATEX wfx{}; size_t dataOff = 0, dataLen = 0; bool valid = false; };
+static WavInfo ParseWavHeader(const std::string& b)
+{
+    WavInfo i; const char* p = b.data(); size_t sz = b.size();
+    if (sz < 44) return i;
+    bool hasFmt = false, hasData = false;
+    for (size_t pos = 12; pos + 8 <= sz; ) {
+        uint32_t cSz = 0; std::memcpy(&cSz, p + pos + 4, 4);
+        if (cSz == 0xFFFFFFFFu) cSz = static_cast<uint32_t>(sz - pos - 8);
+        if (p[pos]=='f'&&p[pos+1]=='m'&&p[pos+2]=='t'&&p[pos+3]==' '&&cSz>=16) {
+            uint16_t tag=0,ch=0,ba=0,bps=0; uint32_t sr=0;
+            std::memcpy(&tag,p+pos+8,2); std::memcpy(&ch, p+pos+10,2);
+            std::memcpy(&sr, p+pos+12,4); std::memcpy(&ba, p+pos+20,2);
+            std::memcpy(&bps,p+pos+22,2);
+            if (tag != 1) return i; // not PCM — let MCI handle it
+            i.wfx = { WAVE_FORMAT_PCM, ch, sr, sr*ba, ba, bps, 0 }; hasFmt = true;
+        } else if (p[pos]=='d'&&p[pos+1]=='a'&&p[pos+2]=='t'&&p[pos+3]=='a') {
+            i.dataOff = pos + 8;
+            i.dataLen = (size_t)cSz < sz - i.dataOff ? (size_t)cSz : sz - i.dataOff;
+            hasData = true;
+        }
+        if (hasFmt && hasData) break;
+        if (cSz == 0 || pos + 8 + static_cast<size_t>(cSz) > sz) break;
+        pos += 8 + cSz + (cSz & 1); // RIFF chunks are word-aligned
+    }
+    i.valid = hasFmt && hasData && i.wfx.nChannels && i.wfx.nSamplesPerSec && i.dataLen;
+    return i;
 }
 
 // Shared audio processing + playback: called from both PlayAudioUrl and PlayAudioRaw.
@@ -346,49 +515,210 @@ static void PlayAudioBytes(std::string bytes, const std::string& ct)
         }
     }
 
-    // Stop current playback before swapping the buffer / writing a file.
-    StopAudio();
+    // Claim a generation slot.  Do NOT call StopAudio() here — that bumps the
+    // generation counter a second time and would immediately invalidate myGen.
+    // Instead, stop+close the previous segment inline under s_mciMtx.
+    uint32_t myGen = ++s_audioGen;
+
+    auto mciErr = [](MCIERROR e) -> std::string {
+        if (!e) return "ok"; char b[256] = {}; mciGetErrorStringA(e, b, 256); return b; };
+
+    char tempDir[MAX_PATH] = {}; GetTempPathA(MAX_PATH, tempDir);
+    std::string tempDirS = tempDir;
 
     if (isWav) {
-        // WAV: play directly from memory -- no temp file, no file lock.
-        // Keep the mutex held through PlaySound so s_wavBuf can't be swapped
-        // out from under us if a second audio thread starts concurrently.
-        BOOL ok;
-        {
-            std::lock_guard<std::mutex> lk(s_wavBufMtx);
-            s_wavBuf = std::move(bytes);
-            // PlaySound with SND_MEMORY (synchronous -- no SND_ASYNC) blocks this background
-            // thread until playback finishes, so we can fire the JS completion callback below.
-            // This is safe because we are already on a detached worker thread.
-            ok = PlaySound(reinterpret_cast<LPCSTR>(s_wavBuf.data()), nullptr,
-                           SND_MEMORY | SND_NODEFAULT);
+        // ── waveOut in-memory path (no temp file) ─────────────────────────
+        // Playing directly from the bytes buffer avoids writing a temp file,
+        // which sidesteps the EACCES failures caused by Windows Defender (or
+        // the MCI driver itself) holding a file lock on snpd_audio.wav after
+        // the previous segment finished.
+        auto wi = ParseWavHeader(bytes);
+        if (wi.valid) {
+            {
+                std::lock_guard<std::mutex> lk(s_mciMtx);
+                // Clean up any previous waveOut session that wasn't closed yet
+                // (e.g. pre-empted by a rapid ClearAudioQueue call).
+                if (s_hwo) {
+                    waveOutReset(s_hwo);
+                    waveOutUnprepareHeader(s_hwo, &s_hwoHdr, sizeof(WAVEHDR));
+                    s_hwoHdr = {};
+                    waveOutClose(s_hwo); s_hwo = nullptr;
+                }
+                // Also close any lingering MCI device (fallback path or prior session).
+                mciSendStringA("stop snpd wait", nullptr, 0, nullptr);
+                mciSendStringA("close snpd wait", nullptr, 0, nullptr);
+
+                MMRESULT mo = waveOutOpen(&s_hwo, WAVE_MAPPER, &wi.wfx, 0, 0, CALLBACK_NULL);
+                logger::info("SkyrimNetDashboard: waveOut open gen={}: {}",
+                    myGen, mo == MMSYSERR_NOERROR ? "ok" : std::to_string(mo));
+                if (mo != MMSYSERR_NOERROR) { s_hwo = nullptr; return; }
+
+                s_hwoHdr = {};
+                s_hwoHdr.lpData         = const_cast<char*>(bytes.data() + wi.dataOff);
+                s_hwoHdr.dwBufferLength = static_cast<DWORD>(wi.dataLen);
+                waveOutPrepareHeader(s_hwo, &s_hwoHdr, sizeof(WAVEHDR));
+                waveOutWrite(s_hwo, &s_hwoHdr, sizeof(WAVEHDR));
+                logger::info("SkyrimNetDashboard: waveOut play gen={} pcm_bytes={}",
+                    myGen, wi.dataLen);
+            }
+
+            // Poll until the buffer completes, we are pre-empted (gen bump), or
+            // a 30-min safety cap is hit.  While paused, waveOut holds its position
+            // and WHDR_DONE is never set, so we sleep longer to avoid spinning.
+            // ClearAudioQueue bumps s_audioGen which breaks the loop immediately.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            for (int i = 0; i < 36000; ++i) {  // 36 000 × 50 ms ≈ 30 min max
+                if (s_audioGen.load() != myGen) break; // pre-empted by stop/clear
+                if (s_aqPaused.load()) {
+                    // Paused via waveOutPause — just wait, don't check WHDR_DONE.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    continue;
+                }
+                bool done = false;
+                {
+                    std::lock_guard<std::mutex> lk(s_mciMtx);
+                    done = s_hwo && (s_hwoHdr.dwFlags & WHDR_DONE);
+                }
+                if (done) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+
+            // Unconditional cleanup — bytes must remain alive until here because
+            // s_hwoHdr.lpData points directly into bytes.data().
+            {
+                std::lock_guard<std::mutex> lk(s_mciMtx);
+                if (s_hwo) {
+                    waveOutUnprepareHeader(s_hwo, &s_hwoHdr, sizeof(WAVEHDR));
+                    s_hwoHdr = {};
+                    waveOutClose(s_hwo); s_hwo = nullptr;
+                }
+            }
+            logger::info("SkyrimNetDashboard: waveOut playback done gen={}", myGen);
+
+            // Notify JS (same logic as the MCI path below).
+            if (s_audioGen.load() == myGen && s_PrismaUI && s_PrismaUI->IsValid(s_View)) {
+                s_PrismaUI->Invoke(s_View,
+                    "try{"
+                    "var _fr=document.getElementById('snpd-frame');"
+                    "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onAudioEnded)"
+                    "_fr.contentWindow.__onAudioEnded();"
+                    "}catch(e){}",
+                    nullptr);
+                logger::info("SkyrimNetDashboard: __onAudioEnded dispatched gen={}", myGen);
+            } else {
+                logger::info("SkyrimNetDashboard: __onAudioEnded skipped gen={} current={}",
+                    myGen, s_audioGen.load());
+            }
+            return;
         }
-        logger::info("SkyrimNetDashboard: PlaySound finished: {}", ok ? "ok" : "failed");
-        // Notify JS that audio has ended so the UI can reset button states.
-        if (s_PrismaUI && s_PrismaUI->IsValid(s_View)) {
-            s_PrismaUI->Invoke(s_View,
-                "window.__onAudioEnded&&window.__onAudioEnded();", nullptr);
-            logger::info("SkyrimNetDashboard: __onAudioEnded dispatched");
-        }
-    } else {
-        // Non-WAV fallback (MP3 etc.) still uses MCI + a temp file.
-        // MCI stop/close with 'wait' already done by StopAudio() above.
-        char tempDir[MAX_PATH] = {}; GetTempPathA(MAX_PATH, tempDir);
-        std::string tempPath = std::string(tempDir) + "snpd_audio.mp3";
-        logger::info("SkyrimNetDashboard: MCI fallback writing {} bytes to '{}'", bytes.size(), tempPath);
-        {
-            std::ofstream f(tempPath, std::ios::binary);
-            if (!f) { logger::warn("SkyrimNetDashboard: MCI temp file open failed"); return; }
+        // WAV but non-PCM fmt (rare) — fall through to MCI with temp file.
+    }
+
+    // ── MCI path: non-WAV (transcoded) or non-PCM WAV ─────────────────────
+    {
+        std::string playPath;
+        if (isWav) {
+            // WAV but ParseWavHeader failed (non-PCM fmt chunk).
+            // Use a per-generation filename so we never collide with a file
+            // that a previous MCI session may still hold open.
+            playPath = tempDirS + "snpd_audio_" + std::to_string(myGen) + ".wav";
+            logger::info("SkyrimNetDashboard: writing WAV {} bytes to '{}' gen={}", bytes.size(), playPath, myGen);
+            std::ofstream f(playPath, std::ios::binary);
+            if (!f) { logger::warn("SkyrimNetDashboard: temp WAV open failed"); return; }
             f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        } else {
+            // Non-WAV (MP3, AAC, …).  Write to a temp source file, then transcode to
+            // PCM WAV via Media Foundation.  This avoids the DirectShow-backed
+            // "mpegvideo" MCI driver entirely: that driver requires the calling thread
+            // to pump a Win32 message queue (STA requirement), but our background
+            // thread has no message loop — so mciSendStringA("play mpegvideo wait")
+            // deadlocks, and even async "play" can freeze if the MCI driver window was
+            // created on the game thread (which never pumps Win32 messages).
+            std::string srcPath  = tempDirS + "snpd_audio_src.mp3";
+            std::string dstPath  = tempDirS + "snpd_audio_" + std::to_string(myGen) + ".wav";
+            logger::info("SkyrimNetDashboard: writing non-WAV {} bytes to '{}' gen={}", bytes.size(), srcPath, myGen);
+            {
+                std::ofstream f(srcPath, std::ios::binary);
+                if (!f) { logger::warn("SkyrimNetDashboard: temp src open failed"); return; }
+                f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            }
+            // Widen paths for Media Foundation (requires WCHAR)
+            auto toWide = [](const std::string& s) -> std::wstring {
+                int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+                std::wstring w(n - 1, 0);
+                MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+                return w;
+            };
+            if (!TranscodeToWav(toWide(srcPath), toWide(dstPath))) {
+                logger::warn("SkyrimNetDashboard: TranscodeToWav failed gen={}", myGen);
+                return;
+            }
+            playPath = dstPath;
+            logger::info("SkyrimNetDashboard: transcoded to WAV '{}'", playPath);
         }
-        auto mciErr = [](MCIERROR e) -> std::string {
-            if (!e) return "ok"; char b[256] = {}; mciGetErrorStringA(e, b, 256); return b; };
-        std::string oc = "open \"" + tempPath + "\" type mpegvideo alias snpd";
-        MCIERROR oe = mciSendStringA(oc.c_str(), nullptr, 0, nullptr);
-        logger::info("SkyrimNetDashboard: MCI open result: {}", mciErr(oe));
-        if (oe) return;
-        MCIERROR pe = mciSendStringA("play snpd", nullptr, 0, nullptr);
-        logger::info("SkyrimNetDashboard: MCI play result: {}", mciErr(pe));
+
+        {
+            std::lock_guard<std::mutex> lk(s_mciMtx);
+            // Stop whatever the previous segment opened, then open this segment.
+            mciSendStringA("stop snpd wait", nullptr, 0, nullptr);
+            mciSendStringA("close snpd wait", nullptr, 0, nullptr);
+
+            // Always open as waveaudio — mpegvideo is never used.
+            std::string oc = "open \"" + playPath + "\" type waveaudio alias snpd";
+            MCIERROR oe = mciSendStringA(oc.c_str(), nullptr, 0, nullptr);
+            logger::info("SkyrimNetDashboard: MCI open gen={}: {}", myGen, mciErr(oe));
+            if (oe) return;
+
+            MCIERROR pe = mciSendStringA("play snpd", nullptr, 0, nullptr);
+            logger::info("SkyrimNetDashboard: MCI play async gen={}: {}", myGen, mciErr(pe));
+            if (pe) {
+                mciSendStringA("close snpd wait", nullptr, 0, nullptr);
+                return;
+            }
+        }
+
+        // Poll until MCI reports the track has stopped, we are pre-empted by a newer
+        // segment, or a 30-minute safety cap is hit.  Sleep 200 ms first so MCI has
+        // time to transition from "not ready" / "opening" to "playing".
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        for (int i = 0; i < 12000; ++i) {  // 12 000 × 150 ms ≈ 30 min max
+            if (s_audioGen.load() != myGen) break; // pre-empted
+            char modeBuf[64] = {};
+            mciSendStringA("status snpd mode", modeBuf, sizeof(modeBuf), nullptr);
+            if (std::string(modeBuf) != "playing") break; // stopped naturally or error
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+
+        // Close our device only if we still own this generation slot.
+        // If a newer segment pre-empted us it already stopped+closed snpd.
+        {
+            std::lock_guard<std::mutex> lk(s_mciMtx);
+            if (s_audioGen.load() == myGen)
+                mciSendStringA("close snpd wait", nullptr, 0, nullptr);
+        }
+        // Clean up per-generation temp file (best-effort; might still be locked
+        // by the MCI driver for a moment — that is fine since it has its own name).
+        DeleteFileA(playPath.c_str());
+    }
+    logger::info("SkyrimNetDashboard: MCI playback done gen={}", myGen);
+
+    // Notify JS only for the most recently requested segment.
+    // The audio bridge (and _paActive) live in the IFRAME's window context
+    // (injected via InjectPatches), not in the shell window context that
+    // Invoke() targets.  Reach through snpd-frame's contentWindow so the
+    // 'ended' events fire on the correct Audio instances.
+    if (s_audioGen.load() == myGen && s_PrismaUI && s_PrismaUI->IsValid(s_View)) {
+        s_PrismaUI->Invoke(s_View,
+            "try{"
+            "var _fr=document.getElementById('snpd-frame');"
+            "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onAudioEnded)"
+            "_fr.contentWindow.__onAudioEnded();"
+            "}catch(e){}",
+            nullptr);
+        logger::info("SkyrimNetDashboard: __onAudioEnded dispatched gen={}", myGen);
+    } else {
+        logger::info("SkyrimNetDashboard: __onAudioEnded skipped gen={} current={}",
+            myGen, s_audioGen.load());
     }
 }
 
@@ -416,8 +746,8 @@ static void PlayAudioUrl(std::string url)
     }).detach();
 }
 
-// Called from the /audio-raw endpoint -- JS fetched blob bytes and POSTed them as
-// raw binary so that blob: URLs (e.g. TTS) work despite being browser-only objects.
+// Called from the /audio-raw endpoint -- JS fetched blob bytes and POSTed them
+// as raw binary so blob: URLs (e.g. TTS) work despite being browser-only objects.
 static void PlayAudioRaw(std::string bytes, std::string ct)
 {
     std::thread([bytes = std::move(bytes), ct = std::move(ct)]() mutable {
@@ -425,6 +755,137 @@ static void PlayAudioRaw(std::string bytes, std::string ct)
         PlayAudioBytes(std::move(bytes), ct);
     }).detach();
 }
+
+// ── Streaming audio queue implementation ─────────────────────────────────────
+
+static std::string Base64Decode(const std::string& s)
+{
+    // Standard RFC 4648 base64 decoder — ignores whitespace and padding.
+    static const signed char kT[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
+    std::string out;
+    out.reserve(s.size() * 3 / 4);
+    int val = 0, bits = -8;
+    for (unsigned char c : s) {
+        if (c == '=' || c == '\r' || c == '\n') continue;
+        int i = kT[c];
+        if (i < 0) continue;
+        val = (val << 6) | i;
+        bits += 6;
+        if (bits >= 0) {
+            out += static_cast<char>((val >> bits) & 0xFF);
+            bits -= 8;
+        }
+    }
+    return out;
+}
+
+// Clear the audio queue and stop whatever is currently playing.
+// Called when a new TTS stream session begins so stale segments don't leak.
+static void ClearAudioQueue()
+{
+    {
+        std::lock_guard<std::mutex> lk(s_aqMtx);
+        s_aqPending.clear();
+        s_aqPaused.store(false);
+    }
+    s_aqCv.notify_all();
+    ++s_audioGen; // stop any segment currently being played by the runner
+    {
+        std::lock_guard<std::mutex> lk(s_mciMtx);
+        if (s_hwo) waveOutReset(s_hwo); // immediately marks buffer DONE so poll exits
+        mciSendStringA("stop snpd wait", nullptr, 0, nullptr);
+        mciSendStringA("close snpd wait", nullptr, 0, nullptr);
+    }
+    logger::info("SkyrimNetDashboard: audio queue cleared");
+}
+
+static void PauseAudioQueue()
+{
+    // Use waveOutPause (not waveOutReset) so the hardware keeps its exact byte
+    // position.  The polling loop in PlayAudioBytes just keeps sleeping because
+    // WHDR_DONE is never set while paused — no gen bump needed.  On resume,
+    // waveOutRestart continues from the same position and the segment finishes
+    // naturally, causing __onAudioEnded to fire in-sync for text display.
+    {
+        std::lock_guard<std::mutex> lk(s_mciMtx);
+        if (s_hwo) waveOutPause(s_hwo);
+        mciSendStringA("pause snpd wait", nullptr, 0, nullptr); // for MCI fallback path
+    }
+    s_aqPaused.store(true);
+    logger::info("SkyrimNetDashboard: audio queue paused");
+}
+
+static void ResumeAudioQueue()
+{
+    {
+        std::lock_guard<std::mutex> lk(s_mciMtx);
+        if (s_hwo) waveOutRestart(s_hwo); // continue from exact pause position
+        mciSendStringA("resume snpd", nullptr, 0, nullptr); // for MCI fallback path
+    }
+    s_aqPaused.store(false);
+    s_aqCv.notify_all();
+    logger::info("SkyrimNetDashboard: audio queue resumed");
+}
+
+static void PushToAudioQueue(std::string wavBytes)
+{
+    {
+        std::lock_guard<std::mutex> lk(s_aqMtx);
+        s_aqPending.push_back(std::move(wavBytes));
+    }
+    s_aqCv.notify_one();
+}
+
+// Permanent background thread that plays one queued WAV segment at a time.
+// PlayAudioBytes blocks until the segment is done, then fires __onAudioEnded
+// so SkyrimNet's JS r() chain can advance to the next segment.
+static void AudioQueueRunner()
+{
+    logger::info("SkyrimNetDashboard: AudioQueueRunner started");
+    while (s_aqRunning.load()) {
+        std::string wavBytes;
+        {
+            std::unique_lock<std::mutex> lk(s_aqMtx);
+            // Wait until: (has segments AND not paused) OR shutdown.
+            s_aqCv.wait(lk, []() {
+                return (!s_aqPending.empty() && !s_aqPaused.load()) || !s_aqRunning.load();
+            });
+            if (!s_aqRunning.load()) break;
+            if (s_aqPaused.load() || s_aqPending.empty()) continue;
+            wavBytes = std::move(s_aqPending.front());
+            s_aqPending.pop_front();
+        }
+        if (!wavBytes.empty())
+            PlayAudioBytes(std::move(wavBytes), "audio/wav");
+    }
+    logger::info("SkyrimNetDashboard: AudioQueueRunner stopped");
+}
+
+static void EnsureAudioQueueRunning()
+{
+    if (!s_aqRunning.exchange(true))
+        std::thread(AudioQueueRunner).detach();
+}
+
+// Fire-and-forget: response is ignored by the browser; __onAudioEnded is
+// dispatched later via Invoke() once C++ playback finishes.
 static void OnAudioMessage(const char* json)
 {
     if (!json || json[0] == '\0') {
@@ -437,9 +898,15 @@ static void OnAudioMessage(const char* json)
     logger::info("SkyrimNetDashboard: audio action='{}' src='{}'", action, src);
 
     if (action == "play" && !src.empty()) {
-        PlayAudioUrl(src);
+        std::thread([s = src]() { PlayAudioUrl(s); }).detach();
     } else if (action == "pause" || action == "stop") {
-        StopAudio();
+        // When the C++ audio queue is active (streaming TTS), pause it so the
+        // runner thread doesn't immediately start the next segment.  For plain
+        // audio (non-streaming), StopAudio() is sufficient.
+        if (s_aqRunning.load())
+            PauseAudioQueue();
+        else
+            StopAudio();
     } else {
         logger::warn("SkyrimNetDashboard: audio unrecognised action='{}' src='{}'", action, src);
     }
@@ -510,8 +977,10 @@ static void OnToggle()
         logger::info("SkyrimNetDashboard: opened.");
     }
     else if (s_PrismaUI->HasFocus(s_View)) {
-        // Signal hidden, unfocus, optionally hide depending on KeepBackground
-        StopAudio();
+        // Signal hidden, unfocus, optionally hide depending on KeepBackground.
+        // Do NOT stop audio here — diary TTS should continue playing in the
+        // background while the player is in-game.  The in-player bottom-bar
+        // pause button is the intended way to stop audio.
         s_PrismaUI->Invoke(s_View, JS_HIDE);
         s_PrismaUI->Unfocus(s_View);
         if (!s_cfg.keepBg)
@@ -528,7 +997,7 @@ static void OnClose()
 {
     if (!s_PrismaUI || !s_PrismaUI->IsValid(s_View)) return;
     if (!s_PrismaUI->IsHidden(s_View)) {
-        StopAudio();
+        // Do NOT stop audio — see comment in OnToggle above.
         s_PrismaUI->Invoke(s_View, JS_HIDE);
         s_PrismaUI->Unfocus(s_View);
         if (!s_cfg.keepBg)
@@ -844,8 +1313,6 @@ iframe{width:100%;height:100%;border:none;display:block}
   var snpdFr=FR;
   function snpdPatch(){try{var cw=snpdFr.contentWindow;if(!cw)return;cw.confirm=function(){return true;};cw.alert=function(){};cw.prompt=function(m,d){return d!==undefined?d:'';};cw.open=function(url){if(url)cw.location.href=url;return cw;};cw.document.addEventListener('wheel',function(e){if(!e.ctrlKey)return;e.preventDefault();e.stopPropagation();var delta=e.deltaY<0?0.1:-0.1;zoom=Math.min(3,Math.max(0.25,Math.round((zoom+delta)*100)/100));applyZoom();},{passive:false,capture:true});}catch(_){}}
   snpdFr.addEventListener('load',snpdPatch);
-  // C++ Invoke() runs in this (shell) frame -- bridge __onAudioEnded into the same-origin iframe.
-  window.__onAudioEnded=function(){try{var cw=snpdFr.contentWindow;if(cw&&cw.__onAudioEnded)cw.__onAudioEnded();}catch(_){}};
 
   // ── Resize handles ─────────────────────────────────────────────────────────
   var rDir=null,rSX=0,rSY=0,rRect=null;
@@ -1367,30 +1834,33 @@ static std::string InjectPatches(std::string body)
         "};"
         "})();\n"
         // ── Audio bridge ─────────────────────────────────────────────────────
-        // Ultralight has no HTMLMediaElement/Web Audio support. Override the
-        // Audio constructor and HTMLAudioElement prototype so SkyrimNet's calls
-        // POST to /audio on our local proxy server, which fetches the URL and
-        // plays it via Windows MCI. Using fetch avoids cross-frame JS issues.
+        // Ultralight has no HTMLMediaElement/Web Audio/AudioContext support.
+        // We provide a complete fake Audio + AudioContext that:
+        //   - Has a working addEventListener/removeEventListener/dispatchEvent
+        //   - Fires canplaythrough+loadedmetadata etc. 30ms after src is set so
+        //     React components that wait for "ready" events unblock immediately
+        //   - Intercepts document.createElement('audio') for apps that bypass new Audio()
+        //   - Provides an AudioContext stub for apps that probe Web Audio API
+        //   - C++ proxy caches audio bytes and returns stub+ID header; play() is tiny
         "(function(){"
         // Active Audio instances waiting for completion.
         "var _paActive=[];"
         // Called from C++ via Invoke() when PlaySound finishes.
-        // Fires onended on every tracked Audio instance and dispatches a document event
-        // so that React UI components can reset their button/state.
         "window.__onAudioEnded=function(){"
         "var a=_paActive.splice(0,_paActive.length);"
         "for(var i=0;i<a.length;i++){"
         "try{a[i].paused=true;a[i].ended=true;}catch(e){}"
-        "try{if(typeof a[i].onended==='function')a[i].onended(new Event('ended'));}catch(e){}"
+        "try{_fireOn(a[i],'ended');}catch(e){}"
         "}"
         "try{document.dispatchEvent(new Event('snpd:audioended'));}catch(e){}"
         "};"
+        // _pa: dispatch play/pause/stop to local proxy
         "var _pa=function(action,src){"
         "try{"
         "var r=src||'';"
         "try{r=(new URL(src||'',window.location.href)).href;}catch(e){}"
-        // blob: URLs only exist in browser memory — fetch bytes here and POST binary to /audio-raw
         "if(action==='play'&&r.indexOf('blob:')===0){"
+        // blob: URL — fetch bytes then POST raw to /audio-raw for C++ playback
         "fetch(r).then(function(res){"
         "var ct=res.headers.get('Content-Type')||'audio/mpeg';"
         "return res.arrayBuffer().then(function(ab){"
@@ -1402,23 +1872,99 @@ static std::string InjectPatches(std::string body)
         "}"
         "}catch(e){}"
         "};"
-        "window.Audio=function AB(src){this._src=src||'';"
-        "this.currentTime=0;this.volume=1;this.paused=true;"
-        "this.ended=false;this.loop=false;"
+        // _fireOn: call on* callback + any addEventListener listeners for an event
+        "function _fireOn(obj,name){"
+        "var e=new Event(name);"
+        "var cb=obj['on'+name];"
+        "if(typeof cb==='function'){try{cb.call(obj,e);}catch(_){}}"
+        "var evts=obj._evts&&obj._evts[name];"
+        "if(evts){evts.slice().forEach(function(fn){try{fn.call(obj,e);}catch(_){}});}"
+        "}"
+        // _scheduleFakeLoad: simulate media load completion so apps waiting for
+        // canplaythrough / readyState==4 unblock ~30ms after src is assigned
+        "function _scheduleFakeLoad(audio){"
+        "setTimeout(function(){"
+        "audio.readyState=4;"        // HAVE_ENOUGH_DATA
+        "audio.duration=Infinity;"   // streaming / unknown length is fine
+        "['loadstart','loadedmetadata','loadeddata','canplay','canplaythrough']"
+        ".forEach(function(n){_fireOn(audio,n);});"
+        "},30);}"
+        // Fake Audio constructor
+        "window.Audio=function AB(src){"
+        "this._src='';"
+        "this._evts={};"
+        "this.currentTime=0;this.volume=1;this.muted=false;"
+        "this.paused=true;this.ended=false;this.loop=false;"
+        "this.readyState=0;this.duration=0;"
         "this.onended=null;this.onerror=null;this.oncanplaythrough=null;"
+        "this.onloadedmetadata=null;this.oncanplay=null;this.onloadstart=null;"
+        "this.onplay=null;this.onpause=null;"
+        "if(src){this._src=src;_scheduleFakeLoad(this);}"
         "};"
         "Object.defineProperty(window.Audio.prototype,'src',{"
-        "get:function(){return this._src;},set:function(v){this._src=v;}});"
+        "get:function(){return this._src;},"
+        // Pre-fetch blob data immediately when src is set so the bytes are already
+        // in flight (or done) by the time play() is called — eliminates the extra
+        // round-trip delay between the user pressing play and audio starting.
+        "set:function(v){"
+        "this._src=v;"
+        "if(v)_scheduleFakeLoad(this);"
+        "}});"
+        "window.Audio.prototype.addEventListener=function(name,fn){"
+        "if(!name||!fn)return;"
+        "if(!this._evts[name])this._evts[name]=[];"
+        "this._evts[name].push(fn);};"
+        "window.Audio.prototype.removeEventListener=function(name,fn){"
+        "if(!name||!this._evts[name])return;"
+        "this._evts[name]=this._evts[name].filter(function(f){return f!==fn;});};"
+        "window.Audio.prototype.dispatchEvent=function(e){_fireOn(this,e.type);return true;};"
         "window.Audio.prototype.play=function(){"
-        // Track this instance so __onAudioEnded can fire .onended on it.
         "_paActive.push(this);"
-        "this.paused=false;_pa('play',this._src);"
-        "return{then:function(fn){if(fn)fn();return this;},catch:function(){return this;}};"
+        "this.paused=false;this.ended=false;"
+        "_fireOn(this,'play');"
+        "_pa('play',this._src);"
+        // Return a real Promise so await/then callers get proper async behaviour.
+        "return(typeof Promise!=='undefined')?Promise.resolve():"
+        "{then:function(fn){if(fn)setTimeout(fn,0);return this;},catch:function(){return this;}};"
         "};"
-        "window.Audio.prototype.pause=function(){this.paused=true;_pa('pause',this._src);};"
+        "window.Audio.prototype.pause=function(){"
+        "this.paused=true;"
+        // Remove from _paActive so that a subsequent play() (resume) doesn't
+        // double-push this audio and cause __onAudioEnded to fire twice, which
+        // would advance the segment queue by 2 on each ended event.
+        "var _pi=_paActive.indexOf(this);if(_pi!==-1)_paActive.splice(_pi,1);"
+        // Only send the C++ stop command if audio hasn't already ended naturally.
+        // If C() cleanup-pauses an ended Audio before replay, the async StopAudio
+        // request would race with and invalidate the new PlayAudioBytes gen.
+        "if(!this.ended)_pa('pause',this._src);"
+        "_fireOn(this,'pause');};"
         "window.Audio.prototype.load=function(){};"
-        "window.Audio.prototype.addEventListener=function(){};"
-        "window.Audio.prototype.removeEventListener=function(){};"
+        // AudioContext stub — some players probe Web Audio API availability
+        "if(typeof AudioContext==='undefined'){"
+        "window.AudioContext=window.webkitAudioContext=function(){"
+        "this.state='running';this.currentTime=0;this.destination={};"
+        "this.resume=function(){return Promise.resolve();};"
+        "this.suspend=function(){return Promise.resolve();};"
+        "this.close=function(){return Promise.resolve();};"
+        "this.createGain=function(){"
+        "return{gain:{value:1,setValueAtTime:function(){}},"
+        "connect:function(){},disconnect:function(){}}};"
+        "this.createBufferSource=function(){"
+        "return{buffer:null,loop:false,connect:function(){return this;},"
+        "disconnect:function(){},start:function(){},stop:function(){},"
+        "onended:null}};"
+        "this.decodeAudioData=function(ab,ok,err){"
+        "if(err)err(new Error('not supported'));"
+        "return Promise.reject(new Error('not supported'));};"
+        "this.createMediaElementSource=function(){"
+        "return{connect:function(){return this;},disconnect:function(){}};};};}"
+        // Intercept document.createElement('audio') — some React audio libs
+        // bypass 'new Audio()' entirely and create elements this way
+        "var _origCreate=document.createElement.bind(document);"
+        "document.createElement=function(tag){"
+        "if(typeof tag==='string'&&tag.toLowerCase()==='audio')return new window.Audio();"
+        "return _origCreate(tag);};"
+        // Patch HTMLAudioElement prototype if the engine exposes it
         "if(typeof HTMLAudioElement!=='undefined'){"
         "try{"
         "HTMLAudioElement.prototype.play=function(){"
@@ -1658,6 +2204,175 @@ static bool IsImmutableAsset(const std::string& ct, const std::string& path)
     if (ct.find("font") != std::string::npos) return true;
     if (ct.find("image/") != std::string::npos) return true;
     return false;
+}
+
+// Attempts to proxy a request by piping the upstream response directly to the
+// client socket without buffering.  Used for streaming/chunked responses (e.g.
+// SkyrimNet TTS diary streams) that send NDJSON segments as they are generated.
+// Streaming responses have no Content-Length header; we detect this after reading
+// just the response headers, then pipe the body verbatim so the browser's
+// response.body.getReader() receives segments in real-time.
+//
+// Returns true if the request was handled (response forwarded + client socket
+// left closed by this function).  Returns false if the upstream response had a
+// Content-Length header, meaning it is a regular sized response that should be
+// handled by the normal FetchResource buffering path instead.
+static bool TryStreamProxy(SOCKET client,
+                            const std::string& host, uint16_t port,
+                            const std::string& method, const std::string& path,
+                            const std::string& reqCT, const std::string& reqBody)
+{
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return false;
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    auto ipAddr = inet_addr(host.c_str());
+    if (ipAddr == INADDR_NONE) {
+        struct hostent* he = gethostbyname(host.c_str());
+        if (!he) { closesocket(s); return false; }
+        ipAddr = *reinterpret_cast<u_long*>(he->h_addr_list[0]);
+    }
+    addr.sin_addr.s_addr = ipAddr;
+    if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+        closesocket(s); return false;
+    }
+
+    // Build and send the HTTP request (same format as FetchResource).
+    std::string req = method + " " + path + " HTTP/1.1\r\nHost: " + host + "\r\n";
+    const bool hasBody = method != "GET" && method != "HEAD";
+    if (hasBody) {
+        std::string ct = reqCT.empty() ? "application/json" : reqCT;
+        req += "Content-Type: " + ct + "\r\n";
+        req += "Content-Length: " + std::to_string(reqBody.size()) + "\r\n";
+    } else if (!reqBody.empty()) {
+        if (!reqCT.empty()) req += "Content-Type: " + reqCT + "\r\n";
+        req += "Content-Length: " + std::to_string(reqBody.size()) + "\r\n";
+    }
+    req += "Connection: close\r\n\r\n";
+    req += reqBody;
+    send(s, req.c_str(), static_cast<int>(req.size()), 0);
+
+    // Read upstream response headers (until \r\n\r\n).
+    std::string headerBuf;
+    char tmp[16384];
+    std::size_t sepPos = std::string::npos;
+    while (sepPos == std::string::npos) {
+        int n = recv(s, tmp, sizeof(tmp), 0);
+        if (n <= 0) { closesocket(s); return false; }
+        headerBuf.append(tmp, n);
+        sepPos = headerBuf.find("\r\n\r\n");
+    }
+    std::string headerSection = headerBuf.substr(0, sepPos);
+    std::string alreadyRead   = headerBuf.substr(sepPos + 4);
+
+    // If the upstream response carries a Content-Length, it is a normal
+    // bufferable response.  Hand off to FetchResource instead.
+    std::string hdrlower;
+    hdrlower.reserve(headerSection.size());
+    for (auto c : headerSection)
+        hdrlower += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    if (hdrlower.find("content-length:") != std::string::npos) {
+        closesocket(s);
+        return false;
+    }
+
+    // No Content-Length → streaming response.
+    // For TTS audio streams (SkyrimNet NDJSON) we intercept each
+    // {"type":"segment","audio":"<base64>",...} line: we decode the WAV bytes
+    // in C++ and push them to the audio queue runner, then forward the line
+    // with the "audio" value blanked out so SkyrimNet's JS receives an empty
+    // string instead of 267 KB of base64.  P("", "audio/wav") creates a 0-byte
+    // Blob in ~1 µs instead of the usual ~200 ms, eliminating the burst of
+    // per-segment stalls that was blocking D3DPresent.
+    logger::info("SkyrimNetDashboard: streaming proxy {} {}", method, path);
+    send(client, headerSection.c_str(), static_cast<int>(headerSection.size()), 0);
+    send(client, "\r\n\r\n", 4, 0);
+
+    // Helpers for sending to the client (returns false if the client hung up).
+    auto sendToClient = [&](const char* data, int len) -> bool {
+        if (len <= 0) return true;
+        return send(client, data, len, 0) != SOCKET_ERROR;
+    };
+
+    // Line-buffer: assemble complete NDJSON lines before processing.
+    std::string lineBuf = alreadyRead;
+    bool isAudioStream  = false; // set on first confirmed segment/status line
+
+    // Strip the "audio":"<base64>" field from a JSON line in-place.
+    // Returns the extracted base64 string (empty if not found).
+    auto stripAudioField = [](std::string& line) -> std::string {
+        auto audioKey = line.find("\"audio\"");
+        if (audioKey == std::string::npos) return {};
+        auto colon = line.find(':', audioKey + 7);
+        if (colon == std::string::npos) return {};
+        auto q1 = line.find('"', colon + 1);
+        if (q1 == std::string::npos) return {};
+        auto b64Start = q1 + 1;
+        auto b64End   = line.find('"', b64Start);
+        if (b64End == std::string::npos || b64End <= b64Start) return {};
+        std::string b64 = line.substr(b64Start, b64End - b64Start);
+        line.erase(b64Start, b64End - b64Start); // blank value → P("") ≈ 1 µs in JS
+        return b64;
+    };
+
+    auto processLine = [&](std::string& line) -> bool {
+        // Detect TTS audio stream on first NDJSON line that looks like one.
+        if (!isAudioStream &&
+                line.find("\"type\"") != std::string::npos &&
+                (line.find("\"segment\"") != std::string::npos ||
+                 line.find("\"status\"")  != std::string::npos)) {
+            isAudioStream = true;
+            ClearAudioQueue();        // flush any leftovers from a previous run
+            EnsureAudioQueueRunning();
+            logger::info("SkyrimNetDashboard: TTS audio stream detected, C++ queue active");
+        }
+
+        if (isAudioStream) {
+            if (line.find("\"type\":\"segment\"") != std::string::npos) {
+                // Decode WAV in C++ and push to queue; blank the field so
+                // JS receives P("","audio/wav") ≈ 1 µs instead of ~200 ms.
+                std::string b64 = stripAudioField(line);
+                if (!b64.empty()) {
+                    std::string wav = Base64Decode(b64);
+                    if (!wav.empty())
+                        PushToAudioQueue(std::move(wav));
+                }
+            } else if (line.find("\"type\":\"complete\"") != std::string::npos) {
+                // The "complete" message carries the full-entry WAV for the
+                // download button.  Strip it unconditionally: Ultralight cannot
+                // trigger file downloads, and passing multi-MB base64 to JS
+                // P() would freeze the game thread for several seconds via
+                // ultralightFuture.get() in D3DPresent.
+                stripAudioField(line);
+                logger::info("SkyrimNetDashboard: stripped complete-message audio (download blob)");
+            }
+        }
+
+        return sendToClient(line.c_str(), static_cast<int>(line.size()));
+    };
+
+    while (true) {
+        // Drain all complete lines from the buffer before reading more data.
+        std::string::size_type nl;
+        while ((nl = lineBuf.find('\n')) != std::string::npos) {
+            std::string line = lineBuf.substr(0, nl + 1);
+            lineBuf.erase(0, nl + 1);
+            if (!processLine(line)) goto done; // client disconnected
+        }
+        {
+            int n = recv(s, tmp, sizeof(tmp), 0);
+            if (n <= 0) break;
+            lineBuf.append(tmp, n);
+        }
+    }
+done:
+    // Flush any partial (unterminated) line.
+    if (!lineBuf.empty())
+        sendToClient(lineBuf.c_str(), static_cast<int>(lineBuf.size()));
+    closesocket(s);
+    return true;
 }
 
 static uint16_t StartShellServer(const std::string& shellHtml, const std::string& dashboardUrl)
@@ -1959,10 +2674,18 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 body        = "{\"saved\":true}";
                 contentType = "application/json";
             } else if (path == "/audio-raw") {
-                // Binary audio endpoint — used for blob: URLs (e.g. TTS).
-                // JS fetches the blob and POSTs raw bytes here with the correct Content-Type.
-                logger::info("SkyrimNetDashboard: /audio-raw POST {} bytes, ct='{}'", reqBody.size(), reqCT);
-                PlayAudioRaw(reqBody, reqCT);
+                // Binary audio endpoint -- JS fetches blob bytes and POSTs them here.
+                // When the C++ audio queue is active, JS Audio.play() on an empty blob
+                // (from a stripped segment line) posts an empty body.  Treat that as a
+                // resume signal; ignore it otherwise.  Non-empty bodies are real audio.
+                if (reqBody.empty()) {
+                    if (s_aqPaused.load())
+                        ResumeAudioQueue();
+                    // else: first play() on a streamed segment — C++ queue handles it.
+                } else {
+                    logger::info("SkyrimNetDashboard: /audio-raw POST {} bytes, ct='{}'", reqBody.size(), reqCT);
+                    PlayAudioRaw(reqBody, reqCT);
+                }
                 body        = "ok";
                 contentType = "text/plain";
             } else if (path == "/proxy" || path == "/proxy/") {
@@ -1980,6 +2703,15 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     }
                 }
                 if (!fromCache) {
+                    // For responses without a Content-Length (streaming/chunked,
+                    // e.g. SkyrimNet TTS diary/memory streams using NDJSON), pipe
+                    // bytes directly to the client so the browser's
+                    // response.body.getReader() receives segments in real-time
+                    // rather than waiting for the entire generation to complete.
+                    if (TryStreamProxy(client, proxyHost, proxyPort, method, path, reqCT, reqBody)) {
+                        closesocket(client);
+                        return;
+                    }
                     auto [resBody, resCt, resSc] = FetchResource(proxyHost, proxyPort, method, path, reqCT, reqBody);
                     body        = std::move(resBody);
                     contentType = std::move(resCt);
@@ -2226,6 +2958,14 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
     SKSE::Init(a_skse);
     logger::info("SkyrimNetDashboard: Plugin loaded.");
+
+    // Initialize Media Foundation once for the process lifetime.
+    // Doing this at load time pre-warms the codec DLLs and thread pool so that
+    // the first TranscodeToWav call during gameplay doesn't spike.
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
+        logger::warn("SkyrimNetDashboard: CoInitializeEx failed (non-fatal)");
+    if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)))
+        logger::warn("SkyrimNetDashboard: MFStartup failed (non-fatal)");
 
     auto* messaging = SKSE::GetMessagingInterface();
     if (!messaging->RegisterListener(MessageHandler)) {

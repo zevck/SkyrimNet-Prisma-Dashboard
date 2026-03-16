@@ -50,6 +50,11 @@ target_link_libraries(
         ws2_32
         winmm
         comdlg32
+        mf
+        mfplat
+        mfreadwrite
+        mfuuid
+        ole32
 )
 
 # ---- Installation ----
