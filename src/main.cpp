@@ -1109,7 +1109,7 @@ iframe{width:100%;height:100%;border:none;display:block}
       FR=document.getElementById('snpd-frame');
   var fs=localStorage.getItem('snpd-fs')==='true';
   var zoom=parseFloat(localStorage.getItem('snpd-zoom')||'1');
-  if(isNaN(zoom)||zoom<0.25||zoom>3)zoom=1;
+  if(isNaN(zoom)||zoom<0.20||zoom>3)zoom=1;
   function applyZoom(){
     FR.style.transformOrigin='top left';
     FR.style.transform='scale('+zoom+')';
@@ -1168,7 +1168,7 @@ iframe{width:100%;height:100%;border:none;display:block}
     if(!e.ctrlKey)return;
     e.preventDefault();
     var delta=e.deltaY<0?0.1:-0.1;
-    zoom=Math.min(3,Math.max(0.25,Math.round((zoom+delta)*100)/100));
+    zoom=Math.min(3,Math.max(0.20,Math.round((zoom+delta)*100)/100));
     applyZoom();
   },{passive:false});
   // Ctrl+Plus / Ctrl+Minus / Ctrl+0 keyboard zoom
@@ -1177,7 +1177,7 @@ iframe{width:100%;height:100%;border:none;display:block}
     if(e.key==='='||e.key==='+'||e.keyCode===187||e.keyCode===107){
       e.preventDefault();zoom=Math.min(3,Math.round((zoom+0.1)*100)/100);applyZoom();
     } else if(e.key==='-'||e.keyCode===189||e.keyCode===109){
-      e.preventDefault();zoom=Math.max(0.25,Math.round((zoom-0.1)*100)/100);applyZoom();
+      e.preventDefault();zoom=Math.max(0.20,Math.round((zoom-0.1)*100)/100);applyZoom();
     } else if(e.key==='0'||e.keyCode===48||e.keyCode===96){
       e.preventDefault();zoom=1;applyZoom();
     }
@@ -1324,7 +1324,7 @@ iframe{width:100%;height:100%;border:none;display:block}
   // Ultralight may route iframe dialogs through the top-level window context,
   // so overriding here catches those cases too.
   var snpdFr=FR;
-  function snpdPatch(){try{var cw=snpdFr.contentWindow;if(!cw)return;cw.confirm=function(){return true;};cw.alert=function(){};cw.prompt=function(m,d){return d!==undefined?d:'';};cw.open=function(url){if(url)cw.location.href=url;return cw;};cw.document.addEventListener('wheel',function(e){if(!e.ctrlKey)return;e.preventDefault();e.stopPropagation();var delta=e.deltaY<0?0.1:-0.1;zoom=Math.min(3,Math.max(0.25,Math.round((zoom+delta)*100)/100));applyZoom();},{passive:false,capture:true});}catch(_){}}
+  function snpdPatch(){try{var cw=snpdFr.contentWindow;if(!cw)return;cw.confirm=function(){return true;};cw.alert=function(){};cw.prompt=function(m,d){return d!==undefined?d:'';};cw.open=function(url){if(url)cw.location.href=url;return cw;};cw.document.addEventListener('wheel',function(e){if(!e.ctrlKey)return;e.preventDefault();e.stopPropagation();var delta=e.deltaY<0?0.1:-0.1;zoom=Math.min(3,Math.max(0.20,Math.round((zoom+delta)*100)/100));applyZoom();},{passive:false,capture:true});}catch(_){}}
   snpdFr.addEventListener('load',snpdPatch);
 
   // ── Resize handles ─────────────────────────────────────────────────────────
@@ -1989,6 +1989,62 @@ static std::string InjectPatches(std::string body)
         "};"
         "}catch(e){}}"
         "})();\n"
+        "</script>\n"
+        // Drag-to-select for general text content (diary, memories, etc)
+        "<script>\n"
+        "(function(){"
+        "var _textDragActive=false,_textDragStart=null,_textDragMoved=false;"
+        "document.addEventListener('mousedown',function(e){"
+        // Skip if already handled by input/textarea drag handler or if clicking buttons
+        "if(e.button!==0||e.shiftKey)return;"
+        "var t=e.target;"
+        // Don't interfere with inputs, textareas, buttons, links, or CodeMirror
+        "if(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.tagName==='BUTTON'"
+        "||t.tagName==='A'||t.isContentEditable)return;"
+        // Also skip if clicking inside CodeMirror editor
+        "var p=t;while(p){if(p.classList&&p.classList.contains('cm-editor'))return;p=p.parentElement;}"
+        // Use caretRangeFromPoint to find the text position under the cursor
+        "var range=document.caretRangeFromPoint?document.caretRangeFromPoint(e.clientX,e.clientY):"
+        "document.caretPositionFromPoint?document.caretPositionFromPoint(e.clientX,e.clientY):null;"
+        "if(!range)return;"
+        "_textDragActive=true;_textDragMoved=false;"
+        "_textDragStart={x:e.clientX,y:e.clientY,range:range};"
+        "},true);"
+        "document.addEventListener('mousemove',function(e){"
+        "if(!_textDragActive||!_textDragStart)return;"
+        // Check if the mouse has moved enough to consider it a drag
+        "var dx=e.clientX-_textDragStart.x,dy=e.clientY-_textDragStart.y;"
+        "if(dx*dx+dy*dy>9){_textDragMoved=true;}"
+        "if(!_textDragMoved)return;"
+        // Get the current position under the cursor
+        "var endRange=document.caretRangeFromPoint?document.caretRangeFromPoint(e.clientX,e.clientY):"
+        "document.caretPositionFromPoint?document.caretPositionFromPoint(e.clientX,e.clientY):null;"
+        "if(!endRange)return;"
+        // Create a selection from start to end
+        "var sel=window.getSelection();sel.removeAllRanges();"
+        "var newRange=document.createRange();"
+        "var startNode=_textDragStart.range.startContainer||_textDragStart.range.offsetNode;"
+        "var startOff=_textDragStart.range.startOffset!==undefined?_textDragStart.range.startOffset:_textDragStart.range.offset||0;"
+        "var endNode=endRange.startContainer||endRange.offsetNode;"
+        "var endOff=endRange.startOffset!==undefined?endRange.startOffset:endRange.offset||0;"
+        "if(!startNode||!endNode)return;"
+        "try{"
+        // Determine the direction of the selection
+        "var cmp=startNode.compareDocumentPosition?startNode.compareDocumentPosition(endNode):0;"
+        "if(cmp&Node.DOCUMENT_POSITION_FOLLOWING||(cmp===0&&endOff>startOff)){"
+        "newRange.setStart(startNode,startOff);newRange.setEnd(endNode,endOff);"
+        "}else{newRange.setStart(endNode,endOff);newRange.setEnd(startNode,startOff);}"
+        "sel.addRange(newRange);"
+        "}catch(_){}},true);"
+        // On mouseup, clear selection if it was just a click (not a drag)
+        "var clearTextDrag=function(e){"
+        "if(_textDragActive&&!_textDragMoved){"
+        "try{window.getSelection().removeAllRanges();}catch(_){}}"
+        "_textDragActive=false;_textDragStart=null;_textDragMoved=false;};"
+        "document.addEventListener('mouseup',clearTextDrag,true);"
+        "document.addEventListener('pointerup',clearTextDrag,true);"
+        "document.addEventListener('pointercancel',clearTextDrag,true);"
+        "})();"
         "</script>\n";
 
     std::string lower = body;
