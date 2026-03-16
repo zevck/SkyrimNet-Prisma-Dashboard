@@ -293,6 +293,14 @@ static std::mutex s_mciMtx;
 static HWAVEOUT s_hwo    = nullptr;
 static WAVEHDR  s_hwoHdr = {};
 
+// ── Diary audio accumulation buffer ──────────────────────────────────────────
+// As TTS segments arrive, their PCM data is appended here so the full entry
+// can be served by the /diary-audio endpoint for the download button.
+static std::mutex            s_diaryMtx;
+static std::vector<uint8_t> s_diaryPcm;
+static WAVEFORMATEX          s_diaryFmt     = {};
+static bool                  s_diaryFmtValid = false;
+
 // ── Streaming audio queue ─────────────────────────────────────────────────────
 // TryStreamProxy decodes base64 WAV segments from the TTS NDJSON stream in C++
 // and pushes them here so the expensive JS P() function (atob + new Array(N))
@@ -812,6 +820,11 @@ static void ClearAudioQueue()
         if (s_hwo) waveOutReset(s_hwo); // immediately marks buffer DONE so poll exits
         mciSendStringA("stop snpd wait", nullptr, 0, nullptr);
         mciSendStringA("close snpd wait", nullptr, 0, nullptr);
+    }
+    {
+        std::lock_guard<std::mutex> lk(s_diaryMtx);
+        s_diaryPcm.clear();
+        s_diaryFmtValid = false;
     }
     logger::info("SkyrimNetDashboard: audio queue cleared");
 }
@@ -2060,6 +2073,15 @@ static std::string ReplaceAll(std::string body, const std::string& needle, const
 
 static std::string PatchBundle(std::string body)
 {
+    // ── Playback banner: fix h.cardBg → h.colors.cardBg ──────────────────────
+    // The diary playback banner accesses h.cardBg / h.border directly on the
+    // theme object, but those live under h.colors.cardBg / h.colors.border.
+    // Result: both class slots are undefined → fully transparent background.
+    // Also remove the pointless backdrop-blur-lg (Ultralight ignores it).
+    body = ReplaceAll(std::move(body),
+        "fixed bottom-0 left-0 right-0 z-50 ${h.cardBg} ${h.border} border-t shadow-2xl backdrop-blur-lg",
+        "fixed bottom-0 left-0 right-0 z-50 ${h.colors.cardBg} ${h.colors.border} border-t shadow-2xl");
+
     // ── glassEffect / cardBg opacity fix ─────────────────────────────────────
     // Ultralight doesn't support backdrop-filter, so classes like
     // bg-white/30 + backdrop-blur-lg render as near-transparent boxes (the blur
@@ -2126,6 +2148,60 @@ static std::string PatchBundle(std::string body)
             logger::info("SkyrimNetDashboard: PatchBundle: patched log download anchor");
         } else {
             logger::warn("SkyrimNetDashboard: PatchBundle: log download anchor needle not found");
+        }
+    }
+
+    // ── Diary audio: complete-message handler + download button ────────────────
+    // The complete handler tries to create a blob and compress to MP3. t.audio
+    // is now "" (stripped), so just redirect downloadUrl to /diary-audio.
+    // We replace just the `b(s)` calls (which set downloadUrl) with `b("/diary-audio")`.
+    {
+        // First b(s) after MP3 compression
+        static const std::string n1 = "URL.createObjectURL(t);b(s),f(\"mp3\")";
+        static const std::string r1 = "URL.createObjectURL(t);b(\"/diary-audio\"),f(\"wav\")";
+        auto p1 = body.find(n1);
+        if (p1 != std::string::npos) {
+            body.replace(p1, n1.size(), r1);
+        }
+        // Second b(s) in the catch fallback
+        static const std::string n2 = "URL.createObjectURL(e);b(s),f(\"wav\")";
+        static const std::string r2 = "URL.createObjectURL(e);b(\"/diary-audio\"),f(\"wav\")";
+        auto p2 = body.find(n2);
+        if (p2 != std::string::npos) {
+            body.replace(p2, n2.size(), r2);
+            logger::info("SkyrimNetDashboard: PatchBundle: complete-handler downloadUrl redirected");
+        } else {
+            logger::warn("SkyrimNetDashboard: PatchBundle: complete-handler needle not found");
+        }
+    }
+    // Download button: replace the <a download>+click pattern with our
+    // fetch → /save-dialog → /save-file flow (same as log downloads).
+    // Needle is unique: the template-literal filename ending + click sequence.
+    {
+        static const std::string dlDiaryNeedle =
+            R"(}_${s.id}.${r}`;e.download=a,document.body.appendChild(e),e.click(),document.body.removeChild(e)})";
+        static const std::string dlDiaryReplace =
+            R"(}_${s.id}.${r}`;)"
+            "(async function(){"
+            "try{"
+            "const dr=await fetch('/save-dialog?name='+encodeURIComponent(a));"
+            "const dj=await dr.json();"
+            "if(dj.cancelled)return;"
+            "const ab=await(await fetch(n)).arrayBuffer();"
+            "const jr=await fetch('/save-file?path='+encodeURIComponent(dj.path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:ab});"
+            "const j=await jr.json();"
+            "const d=document.createElement('div');"
+            "d.style.cssText='position:fixed;bottom:20px;right:20px;z-index:2147483647;padding:10px 16px;border-radius:6px;font-size:12px;font-family:Consolas,monospace;color:#fff;pointer-events:none;max-width:420px;word-break:break-all;transition:opacity 0.4s;'+(j&&j.saved?'background:#16a34a;border:1px solid #15803d;':'background:#dc2626;border:1px solid #b91c1c;');"
+            "d.textContent=j&&j.saved?'\\u2713 Saved: '+(j.path||a):'Save failed: '+(j.error||'unknown');"
+            "document.body.appendChild(d);"
+            "setTimeout(function(){d.style.opacity='0';setTimeout(function(){d.remove();},500);},3500);"
+            R"(}catch(err){console.error('snpd diary save failed',err);}})()})";
+        auto dp = body.find(dlDiaryNeedle);
+        if (dp != std::string::npos) {
+            body.replace(dp, dlDiaryNeedle.size(), dlDiaryReplace);
+            logger::info("SkyrimNetDashboard: PatchBundle: diary download button patched");
+        } else {
+            logger::warn("SkyrimNetDashboard: PatchBundle: diary download button needle not found");
         }
     }
 
@@ -2336,8 +2412,23 @@ static bool TryStreamProxy(SOCKET client,
                 std::string b64 = stripAudioField(line);
                 if (!b64.empty()) {
                     std::string wav = Base64Decode(b64);
-                    if (!wav.empty())
+                    if (!wav.empty()) {
+                        // Accumulate PCM for /diary-audio download endpoint.
+                        {
+                            std::lock_guard<std::mutex> lk(s_diaryMtx);
+                            WavInfo wi = ParseWavHeader(wav);
+                            if (wi.valid && wi.dataLen > 0) {
+                                if (!s_diaryFmtValid) {
+                                    s_diaryFmt      = wi.wfx;
+                                    s_diaryFmtValid = true;
+                                }
+                                s_diaryPcm.insert(s_diaryPcm.end(),
+                                    reinterpret_cast<const uint8_t*>(wav.data()) + wi.dataOff,
+                                    reinterpret_cast<const uint8_t*>(wav.data()) + wi.dataOff + wi.dataLen);
+                            }
+                        }
                         PushToAudioQueue(std::move(wav));
+                    }
                 }
             } else if (line.find("\"type\":\"complete\"") != std::string::npos) {
                 // The "complete" message carries the full-entry WAV for the
@@ -2499,6 +2590,45 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 OnAudioMessage(reqBody.c_str());
                 body        = "ok";
                 contentType = "text/plain";
+            } else if (path == "/diary-audio") {
+                // Serve the accumulated diary WAV for the download button.
+                std::vector<uint8_t> pcmCopy;
+                WAVEFORMATEX fmtCopy = {};
+                bool fmtOk = false;
+                {
+                    std::lock_guard<std::mutex> lk(s_diaryMtx);
+                    pcmCopy = s_diaryPcm;
+                    fmtCopy = s_diaryFmt;
+                    fmtOk   = s_diaryFmtValid;
+                }
+                if (fmtOk && !pcmCopy.empty()) {
+                    auto pcmSz = static_cast<uint32_t>(pcmCopy.size());
+                    uint32_t riffSz = 36 + pcmSz;
+                    body.resize(44 + pcmSz);
+                    auto* p = reinterpret_cast<uint8_t*>(body.data());
+                    std::memcpy(p, "RIFF", 4);               p += 4;
+                    std::memcpy(p, &riffSz, 4);              p += 4;
+                    std::memcpy(p, "WAVE", 4);               p += 4;
+                    std::memcpy(p, "fmt ", 4);               p += 4;
+                    uint32_t fmtChunkSz = 16;
+                    std::memcpy(p, &fmtChunkSz, 4);          p += 4;
+                    uint16_t tag = 1;
+                    std::memcpy(p, &tag,                   2); p += 2;
+                    std::memcpy(p, &fmtCopy.nChannels,     2); p += 2;
+                    std::memcpy(p, &fmtCopy.nSamplesPerSec,4); p += 4;
+                    std::memcpy(p, &fmtCopy.nAvgBytesPerSec,4);p += 4;
+                    std::memcpy(p, &fmtCopy.nBlockAlign,   2); p += 2;
+                    std::memcpy(p, &fmtCopy.wBitsPerSample,2); p += 2;
+                    std::memcpy(p, "data", 4);               p += 4;
+                    std::memcpy(p, &pcmSz, 4);               p += 4;
+                    std::memcpy(p, pcmCopy.data(), pcmSz);
+                    contentType = "audio/wav";
+                    logger::info("SkyrimNetDashboard: /diary-audio: serving {} PCM bytes", pcmSz);
+                } else {
+                    body          = "{\"error\":\"No diary audio available\"}";
+                    contentType   = "application/json";
+                    upstreamStatus = 404;
+                }
             } else if (path.substr(0, 12) == "/save-dialog") {
                 // Opens a native Windows Save-As dialog on the game thread and
                 // returns JSON {"path":"..."}  or  {"cancelled":true}.
@@ -2535,12 +2665,12 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     OPENFILENAMEA ofn = {};
                     ofn.lStructSize  = sizeof(ofn);
                     ofn.hwndOwner    = nullptr;   // no parent HWND
-                    ofn.lpstrFilter  = "All Files\0*.*\0Log Files\0*.log\0Text Files\0*.txt\0";
+                    ofn.lpstrFilter  = "All Files\0*.*\0Log Files\0*.log\0Text Files\0*.txt\0WAV Audio\0*.wav\0";
                     ofn.nFilterIndex = 1;
                     ofn.lpstrFile    = fileBuf;
                     ofn.nMaxFile     = MAX_PATH;
                     ofn.lpstrInitialDir = initDir.c_str();
-                    ofn.lpstrTitle   = "Save log file";
+                    ofn.lpstrTitle   = "Save file";
                     ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
                     if (GetSaveFileNameA(&ofn)) {
