@@ -37,11 +37,36 @@ try{document.dispatchEvent(new Event('snpd:audioended'));}catch(e){}
 window.__onTestTtsEnded=function(){
 try{document.dispatchEvent(new Event('snpd:testttsended'));}catch(e){}
 };
+// Auto-stop audio on client-side navigation (React Router uses pushState/replaceState).
+// The diary playback component unmounts when the user navigates away and doesn't
+// send a stop — so the audio keeps going with no controls to stop it.
+(function(){
+function _snpdNavStop(){
+fetch('/audio',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({action:'stop',src:''})}).catch(function(){});
+}
+var _origPush=history.pushState.bind(history);
+history.pushState=function(){_snpdNavStop();return _origPush.apply(history,arguments);};
+var _origReplace=history.replaceState.bind(history);
+history.replaceState=function(){_snpdNavStop();return _origReplace.apply(history,arguments);};
+window.addEventListener('popstate',_snpdNavStop);
+})();
 // _pa: dispatch play/pause/stop to local proxy
 var _pa=function(action,src){
 try{
 var r=src||'';
-try{r=(new URL(src||'',window.location.href)).href;}catch(e){}
+// For 'play' with empty src: treat as resume (not a new play request).
+// URL.createObjectURL returns '' for unsupported blobs; resolving '' against
+// the page base would give the page's own URL, causing C++ to fetch HTML as
+// audio and bump s_audioGen — killing any in-progress diary playback.
+// For 'pause'/'stop': always send regardless of src so C++ can stop playback.
+if(action==='play'&&!r){
+fetch('/audio',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({action:'resume',src:''})}).catch(function(){});
+return;
+}
+try{if(r)r=(new URL(r,window.location.href)).href;}catch(e){}
+if(action==='play'&&!r)return; // paranoia: still empty after resolution
 if(action==='play'&&r.indexOf('blob:')===0){
 // blob: URL — fetch bytes then POST raw to /audio-raw for C++ playback
 fetch(r).then(function(res){

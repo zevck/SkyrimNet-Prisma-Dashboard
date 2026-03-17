@@ -297,8 +297,11 @@ static std::mutex s_mciMtx;
 // waveOut handle used for in-memory PCM WAV playback (no temp file).
 // Protected by s_mciMtx.  Non-null while a segment is playing or has been
 // reset-but-not-yet-closed by PauseAudioQueue/ClearAudioQueue.
-static HWAVEOUT s_hwo    = nullptr;
-static WAVEHDR  s_hwoHdr = {};
+static HWAVEOUT  s_hwo    = nullptr;
+static WAVEHDR   s_hwoHdr = {};
+// Generation counter that opened s_hwo.  Used to prevent a pre-empted
+// PlayAudioBytes call from closing a *newer* call's active waveOut device.
+static uint32_t  s_hwoGen = 0;
 
 // ── Diary audio accumulation buffer ──────────────────────────────────────────
 // As TTS segments arrive, their PCM data is appended here so the full entry
@@ -559,7 +562,7 @@ static void PlayAudioBytes(std::string bytes, const std::string& ct, bool testTt
                     waveOutReset(s_hwo);
                     waveOutUnprepareHeader(s_hwo, &s_hwoHdr, sizeof(WAVEHDR));
                     s_hwoHdr = {};
-                    waveOutClose(s_hwo); s_hwo = nullptr;
+                    waveOutClose(s_hwo); s_hwo = nullptr; s_hwoGen = 0;
                 }
                 // Also close any lingering MCI device (fallback path or prior session).
                 mciSendStringA("stop snpd wait", nullptr, 0, nullptr);
@@ -569,6 +572,7 @@ static void PlayAudioBytes(std::string bytes, const std::string& ct, bool testTt
                 logger::info("SkyrimNetDashboard: waveOut open gen={}: {}",
                     myGen, mo == MMSYSERR_NOERROR ? "ok" : std::to_string(mo));
                 if (mo != MMSYSERR_NOERROR) { s_hwo = nullptr; return; }
+                s_hwoGen = myGen; // mark ownership: only this call may close this handle
 
                 s_hwoHdr = {};
                 s_hwoHdr.lpData         = const_cast<char*>(bytes.data() + wi.dataOff);
@@ -600,14 +604,18 @@ static void PlayAudioBytes(std::string bytes, const std::string& ct, bool testTt
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
 
-            // Unconditional cleanup — bytes must remain alive until here because
+            // Cleanup: bytes must remain alive until here because
             // s_hwoHdr.lpData points directly into bytes.data().
+            // Only close the handle if WE opened it (s_hwoGen == myGen).
+            // A concurrent PlayAudioBytes call may have already closed our handle
+            // and opened a new one — closing that new handle would corrupt its
+            // playback and cause hissing/crashes.
             {
                 std::lock_guard<std::mutex> lk(s_mciMtx);
-                if (s_hwo) {
+                if (s_hwo && s_hwoGen == myGen) {
                     waveOutUnprepareHeader(s_hwo, &s_hwoHdr, sizeof(WAVEHDR));
                     s_hwoHdr = {};
-                    waveOutClose(s_hwo); s_hwo = nullptr;
+                    waveOutClose(s_hwo); s_hwo = nullptr; s_hwoGen = 0;
                 }
             }
             logger::info("SkyrimNetDashboard: waveOut playback done gen={}", myGen);
@@ -940,12 +948,20 @@ static void OnAudioMessage(const char* json)
 
     if (action == "play" && !src.empty()) {
         std::thread([s = src]() { PlayAudioUrl(s); }).detach();
-    } else if (action == "pause" || action == "stop") {
-        // When the C++ audio queue is active (streaming TTS), pause it so the
-        // runner thread doesn't immediately start the next segment.  For plain
-        // audio (non-streaming), StopAudio() is sufficient.
+    } else if (action == "resume") {
+        // Resume after pause.
+        if (s_aqRunning.load())
+            ResumeAudioQueue();
+    } else if (action == "pause") {
+        // Pause: suspend playback, keeping queue intact so resume can continue.
         if (s_aqRunning.load())
             PauseAudioQueue();
+        else
+            StopAudio();
+    } else if (action == "stop") {
+        // Stop / close banner: clear the queue and stop immediately.
+        if (s_aqRunning.load())
+            ClearAudioQueue();
         else
             StopAudio();
     } else {
