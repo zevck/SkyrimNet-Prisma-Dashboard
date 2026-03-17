@@ -25,14 +25,20 @@ function snpdResolveAccept(inp){
     return '.wav,.fuz,.xwm';
   return acc||'*/*';
 }
+var _snpdDialogOpen=false;
 var _oClick=HTMLInputElement.prototype.click;
 HTMLInputElement.prototype.click=function(){
   if(this.type!=='file'){return _oClick.call(this);}
+  // Guard: ignore click if a dialog is already open (e.g. double-click tail
+  // fires after the native dialog closes and the cursor is still over the button).
+  if(_snpdDialogOpen)return;
+  _snpdDialogOpen=true;
   var inp=this;
   var acc=snpdResolveAccept(inp);
   fetch('/open-dialog?accept='+encodeURIComponent(acc))
     .then(function(r){return r.json();})
     .then(function(j){
+      _snpdDialogOpen=false;
       if(!j||j.cancelled||!j.path)return;
       return fetch('/read-file?path='+encodeURIComponent(j.path))
         .then(function(r){return r.arrayBuffer();})
@@ -51,7 +57,7 @@ HTMLInputElement.prototype.click=function(){
           inp.dispatchEvent(new Event('input',{bubbles:true}));
         });
     })
-    .catch(function(e){console.error('snpd open-dialog:',String(e));});
+    .catch(function(e){_snpdDialogOpen=false;console.error('snpd open-dialog:',String(e));});
 };
 // Also intercept <label> clicks that activate file inputs via the browser's
 // default action — those bypass HTMLInputElement.prototype.click entirely.
