@@ -38,7 +38,10 @@ HTMLInputElement.prototype.click=function(){
   fetch('/open-dialog?accept='+encodeURIComponent(acc))
     .then(function(r){return r.json();})
     .then(function(j){
-      _snpdDialogOpen=false;
+      // Delay clearing the lock so any ghost clicks that arrive immediately
+      // after the native dialog closes (double-click tail, game input replay)
+      // are still blocked.
+      setTimeout(function(){_snpdDialogOpen=false;},400);
       if(!j||j.cancelled||!j.path)return;
       return fetch('/read-file?path='+encodeURIComponent(j.path))
         .then(function(r){return r.arrayBuffer();})
@@ -57,7 +60,7 @@ HTMLInputElement.prototype.click=function(){
           inp.dispatchEvent(new Event('input',{bubbles:true}));
         });
     })
-    .catch(function(e){_snpdDialogOpen=false;console.error('snpd open-dialog:',String(e));});
+    .catch(function(e){setTimeout(function(){_snpdDialogOpen=false;},400);console.error('snpd open-dialog:',String(e));});
 };
 // Also intercept <label> clicks that activate file inputs via the browser's
 // default action — those bypass HTMLInputElement.prototype.click entirely.
