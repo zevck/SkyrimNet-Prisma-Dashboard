@@ -1031,6 +1031,9 @@ static constexpr const char* JS_SHOW =
     "d.dispatchEvent(new Event('visibilitychange'));"
     "})();";
 
+static constexpr const char* JS_GO_HOME =
+    "(function(){var fr=document.getElementById('snpd-frame');if(fr)fr.src='/proxy';})();";
+
 static void OnToggle()
 {
     if (!s_PrismaUI || !s_PrismaUI->IsValid(s_View)) {
@@ -1052,13 +1055,17 @@ static void OnToggle()
         // pause button is the intended way to stop audio.
         s_PrismaUI->Invoke(s_View, JS_HIDE);
         s_PrismaUI->Unfocus(s_View);
+        // Navigate home while the view is hidden/background so the user
+        // sees the correct page immediately on next open (no visible reload).
+        if (s_cfg.defaultHome)
+            s_PrismaUI->Invoke(s_View, JS_GO_HOME);
         if (!s_cfg.keepBg)
             s_PrismaUI->Hide(s_View);
         logger::info("SkyrimNetDashboard: closed.");
     }
     else {
-        // Visible but not focused — re-focus
-        [[maybe_unused]] bool refocused = s_PrismaUI->Focus(s_View);
+        // Visible but not focused — re-focus (pause if configured)
+        [[maybe_unused]] bool refocused = s_PrismaUI->Focus(s_View, s_cfg.pauseGame);
     }
 }
 
@@ -1313,7 +1320,7 @@ iframe{width:100%;height:100%;border:none;display:block}
       lbl.addEventListener('click',function(){cb.checked=!cb.checked;});
       row.appendChild(cb);row.appendChild(lbl);box.appendChild(row);return cb;
     }
-    var cbKeepBg  =mkCheck('Keep menu open in background (stay rendered while closed)',cfg.keepBg);
+    var cbKeepBg  =mkCheck('Keep menu open in background (stay rendered without focus)',cfg.keepBg);
     var cbDefHome =mkCheck('Default to Home page when opening',cfg.defaultHome);
     var cbPause   =mkCheck('Pause game while open',cfg.pauseGame);
     // Note
