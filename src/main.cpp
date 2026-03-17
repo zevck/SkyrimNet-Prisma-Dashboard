@@ -322,6 +322,10 @@ static std::condition_variable s_aqCv;
 static std::deque<std::string> s_aqPending;  // WAV byte strings
 static std::atomic<bool>       s_aqRunning{false};
 static std::atomic<bool>       s_aqPaused{false};
+// Bumped by ClearAudioQueue (inside s_aqMtx).  The SSE handler captures
+// this right after calling ClearAudioQueue and only pushes segments while
+// it still matches — preventing late segment pushes after a nav-stop clear.
+static std::atomic<uint32_t>   s_aqSessionGen{0};
 
 static void StopAudio()
 {
@@ -846,11 +850,13 @@ static void ClearAudioQueue()
 {
     {
         std::lock_guard<std::mutex> lk(s_aqMtx);
+        ++s_audioGen;     // bump gen INSIDE the lock so the runner's dequeue+snapshot sees it
+        ++s_aqSessionGen; // invalidate the SSE handler's push gate
         s_aqPending.clear();
         s_aqPaused.store(false);
     }
     s_aqCv.notify_all();
-    ++s_audioGen; // stop any segment currently being played by the runner
+    // (gen already bumped above)
     {
         std::lock_guard<std::mutex> lk(s_mciMtx);
         if (s_hwo) waveOutReset(s_hwo); // immediately marks buffer DONE so poll exits
@@ -910,6 +916,7 @@ static void AudioQueueRunner()
     logger::info("SkyrimNetDashboard: AudioQueueRunner started");
     while (s_aqRunning.load()) {
         std::string wavBytes;
+        uint32_t genSnap = 0;
         {
             std::unique_lock<std::mutex> lk(s_aqMtx);
             // Wait until: (has segments AND not paused) OR shutdown.
@@ -918,10 +925,14 @@ static void AudioQueueRunner()
             });
             if (!s_aqRunning.load()) break;
             if (s_aqPaused.load() || s_aqPending.empty()) continue;
+            // Snapshot gen INSIDE the lock: ClearAudioQueue bumps gen under this
+            // same lock, so if a clear raced with this dequeue we'll see it here.
+            genSnap = s_audioGen.load();
             wavBytes = std::move(s_aqPending.front());
             s_aqPending.pop_front();
         }
-        if (!wavBytes.empty())
+        // If gen changed between our snapshot and now, a clear fired — discard.
+        if (!wavBytes.empty() && s_audioGen.load() == genSnap)
             PlayAudioBytes(std::move(wavBytes), "audio/wav");
     }
     logger::info("SkyrimNetDashboard: AudioQueueRunner stopped");
@@ -1370,6 +1381,23 @@ iframe{width:100%;height:100%;border:none;display:block}
   var snpdFr=FR;
   function snpdPatch(){try{var cw=snpdFr.contentWindow;if(!cw)return;cw.confirm=function(){return true;};cw.alert=function(){};cw.prompt=function(m,d){return d!==undefined?d:'';};cw.open=function(url){if(url)cw.location.href=url;return cw;};cw.document.addEventListener('wheel',function(e){if(!e.ctrlKey)return;e.preventDefault();e.stopPropagation();var delta=e.deltaY<0?0.1:-0.1;zoom=Math.min(3,Math.max(0.20,Math.round((zoom+delta)*100)/100));applyZoom();},{passive:false,capture:true});}catch(_){}}
   snpdFr.addEventListener('load',snpdPatch);
+)SHELL2"
+    "(function(){"
+    "var _lh='';"
+    "try{_lh=snpdFr.contentWindow.location.href;}catch(e){}"
+    "setInterval(function(){"
+    "try{"
+    "var h=snpdFr.contentWindow.location.href;"
+    "if(h&&h!==_lh){"
+    "_lh=h;"
+    "fetch('/audio',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({action:'stop',src:''})}).catch(function(){});"
+    "}"
+    "}catch(e){}"
+    "},200);"
+    "})();\n"
+    R"SHELL3(
 
   // ── Resize handles ─────────────────────────────────────────────────────────
   var rDir=null,rSX=0,rSY=0,rRect=null;
@@ -1408,7 +1436,7 @@ iframe{width:100%;height:100%;border:none;display:block}
 </script>
 </body>
 </html>
-)SHELL2";
+)SHELL3";
 
     return html;
 }
@@ -2034,7 +2062,8 @@ static bool TryStreamProxy(SOCKET client,
 
     // Line-buffer: assemble complete NDJSON lines before processing.
     std::string lineBuf = alreadyRead;
-    bool isAudioStream  = false; // set on first confirmed segment/status line
+    bool     isAudioStream = false; // set on first confirmed segment/status line
+    uint32_t myAqSession   = 0;     // session gen captured when stream starts; gates pushes
 
     // Strip the "audio":"<base64>" field from a JSON line in-place.
     // Returns the extracted base64 string (empty if not found).
@@ -2062,6 +2091,10 @@ static bool TryStreamProxy(SOCKET client,
             isAudioStream = true;
             ClearAudioQueue();        // flush any leftovers from a previous run
             EnsureAudioQueueRunning();
+            // Capture the session gen AFTER clearing.  If nav-stop fires
+            // ClearAudioQueue from another thread it bumps s_aqSessionGen, making
+            // myAqSession stale — all subsequent PushToAudioQueue calls will bail.
+            myAqSession = s_aqSessionGen.load();
             logger::info("SkyrimNetDashboard: TTS audio stream detected, C++ queue active");
         }
 
@@ -2087,7 +2120,10 @@ static bool TryStreamProxy(SOCKET client,
                                     reinterpret_cast<const uint8_t*>(wav.data()) + wi.dataOff + wi.dataLen);
                             }
                         }
-                        PushToAudioQueue(std::move(wav));
+                        // Only push if this session is still active
+                        // (nav-stop bumps s_aqSessionGen, making myAqSession stale).
+                        if (s_aqSessionGen.load() == myAqSession)
+                            PushToAudioQueue(std::move(wav));
                     }
                 }
             } else if (line.find("\"type\":\"complete\"") != std::string::npos) {

@@ -37,20 +37,6 @@ try{document.dispatchEvent(new Event('snpd:audioended'));}catch(e){}
 window.__onTestTtsEnded=function(){
 try{document.dispatchEvent(new Event('snpd:testttsended'));}catch(e){}
 };
-// Auto-stop audio on client-side navigation (React Router uses pushState/replaceState).
-// The diary playback component unmounts when the user navigates away and doesn't
-// send a stop — so the audio keeps going with no controls to stop it.
-(function(){
-function _snpdNavStop(){
-fetch('/audio',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({action:'stop',src:''})}).catch(function(){});
-}
-var _origPush=history.pushState.bind(history);
-history.pushState=function(){_snpdNavStop();return _origPush.apply(history,arguments);};
-var _origReplace=history.replaceState.bind(history);
-history.replaceState=function(){_snpdNavStop();return _origReplace.apply(history,arguments);};
-window.addEventListener('popstate',_snpdNavStop);
-})();
 // _pa: dispatch play/pause/stop to local proxy
 var _pa=function(action,src){
 try{
