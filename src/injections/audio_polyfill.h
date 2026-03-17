@@ -16,6 +16,12 @@ inline std::string GetAudioPolyfill()
 //     React components that wait for "ready" events unblock immediately
 //   - C++ proxy caches audio bytes and returns stub+ID header; play() is tiny
 (function(){
+// Unconditionally override URL.createObjectURL/revokeObjectURL.
+// Ultralight may define these natively (WebKit heritage) but the Blob URL
+// scheme is not supported — calling the native version crashes the renderer.
+// We must override regardless of whether the native version exists.
+URL.createObjectURL=function(){return '';};
+URL.revokeObjectURL=function(){};
 // Active Audio instances waiting for completion.
 var _paActive=[];
 // Called from C++ via Invoke() when PlaySound finishes.
@@ -155,17 +161,13 @@ window.AudioContext.prototype.resume=function(){return Promise.resolve();};
 window.AudioContext.prototype.suspend=function(){return Promise.resolve();};
 window.AudioContext.prototype.close=function(){return Promise.resolve();};
 }
-// Patch document.body.appendChild to detect when the app creates an <audio>
-// element and appends it to the DOM (some frameworks do this instead of new Audio()).
-// If we see an <audio> being appended, replace it with our polyfill instance.
-if(typeof document!=='undefined'&&document.body){
-var _origAppend=document.body.appendChild;
-document.body.appendChild=function(child){
-if(child.tagName==='AUDIO'||child.nodeName==='AUDIO'){
-var fakeAudio=new window.Audio(child.src||child.getAttribute('src')||'');
-if(child.autoplay)fakeAudio.play();
-return fakeAudio;}
-return _origAppend.call(this,child);};}
+// Intercept document.createElement('audio') — some React audio libs
+// bypass 'new Audio()' entirely and create elements this way
+var _origCreate=document.createElement.bind(document);
+document.createElement=function(tag){
+if(typeof tag==='string'&&tag.toLowerCase()==='audio')return new window.Audio();
+return _origCreate(tag);
+};
 // Patch HTMLAudioElement prototype if the engine exposes it
 if(typeof HTMLAudioElement!=='undefined'){
 try{

@@ -7,6 +7,7 @@
 #include "injections/clipboard.h"
 #include "injections/drag_select.h"
 #include "injections/editor_fixes.h"
+#include "injections/test_page_audio.h"
 
 // -----------------------------------------------------------------------
 //  SkyrimNet Prisma Dashboard
@@ -1553,6 +1554,7 @@ static std::string InjectPatches(std::string body)
     std::string injection = 
         Injections::GetEditorFixes() +
         "<script>\n" +
+        Injections::GetTestPageAudio() +
         Injections::GetClipboardIntegration() +
         Injections::GetAudioPolyfill() +
         Injections::GetDragSelect() +
@@ -1807,6 +1809,60 @@ static std::string PatchBundle(std::string body)
         body.replace(pos, needle.size(), replacement);
         logger::info("SkyrimNetDashboard: PatchBundle: CodeMirror debounce applied");
     }
+
+    // ── Test TTS audio: bypass blob URL → new Audio path (3 minified variants) ────────
+    // The test page plays a TTS sample with:
+    //   fetch(ttsEndpoint) → t.blob() → URL.createObjectURL(blob) → new Audio(blobUrl) → play()
+    // Our C++ proxy intercepts the test-TTS endpoints, fetches the audio from SkyrimNet,
+    // plays it via waveOut, and returns {"status":"playing"}.  The JS never receives
+    // binary audio bytes — it just gets a small JSON response.
+    // So we patch the blob/Audio chain to skip all of that and just wait for the
+    // snpd:audioended event that C++ fires when waveOut finishes.
+    // Three variants exist in the bundle (same pattern, different minified variable names).
+    {
+        struct TtsPatch { std::string needle; std::string replacement; };
+        static const TtsPatch kTtsPatches[] = {
+            // Variant 1: state vars ft/wt/vt, audio alias 'a'
+            {
+                "const s=await t.blob(),r=URL.createObjectURL(s),a=new Audio(r);"
+                "wt(!0),a.onended=()=>{ft(!1),setTimeout(()=>wt(!1),2e3),URL.revokeObjectURL(r)},"
+                "a.onerror=e=>{vt(\"Failed to play TTS audio\"),ft(!1),wt(!1),URL.revokeObjectURL(r)},"
+                "await a.play()",
+                // C++ intercept already fetched the audio and started playing it (fire-and-forget).
+                // Just clear the testing/playing states — no Promise/event wait needed.
+                "ft(!1),wt(!1)"
+            },
+            // Variant 2: state vars b/u/p, audio alias 'a'
+            {
+                "const s=await t.blob(),r=URL.createObjectURL(s),a=new Audio(r);"
+                "b(!0),a.onended=()=>{u(!1),setTimeout(()=>b(!1),2e3),URL.revokeObjectURL(r)},"
+                "a.onerror=e=>{p(\"Failed to play TTS audio\"),u(!1),b(!1),URL.revokeObjectURL(r)},"
+                "await a.play()",
+                "u(!1),b(!1)"
+            },
+            // Variant 3: state vars m/a/n, audio alias 'l'
+            {
+                "const s=await t.blob(),r=URL.createObjectURL(s),l=new Audio(r);"
+                "m(!0),l.onended=()=>{a(!1),setTimeout(()=>m(!1),2e3),URL.revokeObjectURL(r)},"
+                "l.onerror=e=>{n(\"Failed to play TTS audio\"),a(!1),m(!1),URL.revokeObjectURL(r)},"
+                "await l.play()",
+                "a(!1),m(!1)"
+            },
+        };
+        int patchCount = 0;
+        for (auto& p : kTtsPatches) {
+            auto ppos = body.find(p.needle);
+            if (ppos != std::string::npos) {
+                body.replace(ppos, p.needle.size(), p.replacement);
+                ++patchCount;
+            }
+        }
+        if (patchCount > 0)
+            logger::info("SkyrimNetDashboard: PatchBundle: test TTS audio patched ({} variants)", patchCount);
+        else
+            logger::warn("SkyrimNetDashboard: PatchBundle: test TTS audio needle not found");
+    }
+
     return body;
 }
 
@@ -2144,6 +2200,9 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 }
             }
 
+            // Diagnostic: log every incoming request so we can see what the browser sends.
+            logger::info("SkyrimNetDashboard: >> {} {}", method, path);
+
             std::string body;
             std::string contentType = "text/html; charset=utf-8";
             int upstreamStatus = 200;
@@ -2385,6 +2444,86 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 }
                 body        = "ok";
                 contentType = "text/plain";
+            } else if (
+                // Test-TTS endpoints: fetch audio in C++ and play via waveOut so
+                // the browser never has to deal with binary audio bytes.
+                // Matches:
+                //   POST /test?api=tts           (test/setup page — returns JSON with audio_id)
+                //   POST /characters?api=test-custom-tts  (returns audio bytes directly)
+                //   POST /voice-samples?api=test-tts      (returns audio bytes directly)
+                (method == "POST" && path.find("/test") == 0 &&
+                    path.find("api=tts") != std::string::npos &&
+                    path.find("api=tts-") == std::string::npos) ||
+                (path.find("/characters") == 0 && path.find("api=test-custom-tts") != std::string::npos) ||
+                (path.find("/voice-samples") == 0 && path.find("api=test-tts") != std::string::npos)
+            ) {
+                // For /test?api=tts: SkyrimNet returns JSON like
+                //   {"audio_id":"tts_NNN","audio_size":NNN,...}
+                // and the audio is fetched separately via GET /test?api=audio&id=tts_NNN.
+                // We fetch the metadata once, return it to the browser so the UI displays
+                // correct Speaker/AudioSize/Message, then fetch + play the audio in a
+                // background thread (audio fetch is the slow part).
+                //
+                // For the other two endpoints the response IS the audio bytes directly —
+                // fetch and play on background thread, return {"status":"queued"} to browser.
+                logger::info("SkyrimNetDashboard: test-TTS intercept (async): {}", path);
+                bool isTestTts = (method == "POST" && path.find("/test") == 0 &&
+                                  path.find("api=tts") != std::string::npos &&
+                                  path.find("api=tts-") == std::string::npos);
+                if (isTestTts) {
+                    // Fetch metadata synchronously (fast, ~1s for TTS generation,
+                    // returns a small JSON payload — well within Ultralight's timeout).
+                    auto [metaBody, metaCt, metaSc] = FetchResource(proxyHost, proxyPort, method, path, reqCT, reqBody);
+                    body           = metaBody;   // return real JSON to browser
+                    contentType    = std::move(metaCt);
+                    upstreamStatus = metaSc;
+                    // Extract audio_id and fetch+play audio on background thread
+                    if (!metaBody.empty() && metaSc >= 200 && metaSc < 300) {
+                        std::thread([ph = proxyHost, pp = proxyPort, meta = std::move(metaBody)]() {
+                            std::string audioId;
+                            auto k = meta.find("\"audio_id\"");
+                            if (k != std::string::npos) {
+                                auto q1 = meta.find('"', k + 10);
+                                if (q1 != std::string::npos) {
+                                    auto q2 = meta.find('"', q1 + 1);
+                                    if (q2 != std::string::npos)
+                                        audioId = meta.substr(q1 + 1, q2 - q1 - 1);
+                                }
+                            }
+                            if (audioId.empty()) {
+                                logger::warn("SkyrimNetDashboard: test-TTS no audio_id in JSON: {}", meta);
+                                return;
+                            }
+                            std::string audioPath = "/test?api=audio&id=" + audioId;
+                            logger::info("SkyrimNetDashboard: test-TTS fetching audio: {}", audioPath);
+                            auto [audioBytes, audioCt, audioSc] = FetchResource(ph, pp, "GET", audioPath);
+                            if (!audioBytes.empty() && audioSc >= 200 && audioSc < 300) {
+                                logger::info("SkyrimNetDashboard: test-TTS playing {} bytes ct='{}'",
+                                    audioBytes.size(), audioCt);
+                                PlayAudioRaw(std::move(audioBytes), audioCt);
+                            } else {
+                                logger::warn("SkyrimNetDashboard: test-TTS audio fetch {} for {}", audioSc, audioPath);
+                            }
+                        }).detach();
+                    }
+                } else {
+                    // Characters/voice-samples: response is audio bytes directly.
+                    // Fetch+play async, return status immediately.
+                    std::thread([ph = proxyHost, pp = proxyPort,
+                                 m = method, p = path, ct = reqCT, b = reqBody]() mutable {
+                        auto [audioBytes, audioCt, audioSc] = FetchResource(ph, pp, m, p, ct, b);
+                        if (!audioBytes.empty() && audioSc >= 200 && audioSc < 300) {
+                            logger::info("SkyrimNetDashboard: test-TTS playing {} bytes ct='{}'",
+                                audioBytes.size(), audioCt);
+                            PlayAudioRaw(std::move(audioBytes), audioCt);
+                        } else {
+                            logger::warn("SkyrimNetDashboard: test-TTS upstream {} for {}", audioSc, p);
+                        }
+                    }).detach();
+                    body        = "{\"status\":\"queued\"}";
+                    contentType    = "application/json";
+                    upstreamStatus = 200;
+                }
             } else if (path == "/proxy" || path == "/proxy/") {
                 body = FetchAndInject(proxyHost, proxyPort);
             } else {
@@ -2440,10 +2579,14 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 }
             }
 
-            // Immutable assets get long-lived browser cache headers too,
-            // so Ultralight won't re-request them across soft navigations.
+            // Immutable assets (fonts, images) get long-lived browser cache headers.
+            // JavaScript and CSS are always served no-store: our in-process s_assetCache
+            // makes re-fetches instantaneous, and no-store ensures Ultralight always
+            // requests from our proxy so the patched bundle is never stale in disk cache.
             bool immutable = IsImmutableAsset(contentType, path);
-            std::string cacheControl = immutable
+            bool isScript  = contentType.find("javascript") != std::string::npos
+                          || contentType.find("text/css")   != std::string::npos;
+            std::string cacheControl = (immutable && !isScript)
                 ? "max-age=31536000, immutable"
                 : "no-store";
 
