@@ -7,6 +7,7 @@
 #include "injections/clipboard.h"
 #include "injections/drag_select.h"
 #include "injections/editor_fixes.h"
+#include "injections/file_input.h"
 #include "injections/test_page_audio.h"
 
 // -----------------------------------------------------------------------
@@ -1623,6 +1624,7 @@ static std::string InjectPatches(std::string body)
         Injections::GetClipboardIntegration() +
         Injections::GetAudioPolyfill() +
         Injections::GetDragSelect() +
+        Injections::GetFileInputPolyfill() +
         "</script>\n";
 
     std::string lower = body;
@@ -2430,6 +2432,185 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     logger::warn("SkyrimNetDashboard: /save-file failed to write '{}'", savePath);
                 }
                 contentType = "application/json";
+            } else if (path.substr(0, 12) == "/open-dialog") {
+                // Opens a native Windows file-open dialog and returns the chosen path.
+                // ?accept=<mime>  e.g. "audio/*"  drives the filter list.
+                // Returns JSON: {"path":"C:\\...\\file.mp3","mimeType":"audio/mpeg"}
+                //           or: {"cancelled":true}
+                std::string accept = "*/*";
+                {
+                    auto qp = path.find('?');
+                    if (qp != std::string::npos) {
+                        std::string q = path.substr(qp + 1);
+                        auto ap = q.find("accept=");
+                        if (ap != std::string::npos)
+                            accept = UrlDecode(q.substr(ap + 7));
+                    }
+                }
+                // Build a double-null-terminated filter string from the accept attribute.
+                // If accept contains explicit extensions (e.g. ".wav,.fuz,.xwm"), build a
+                // custom filter from those.  Otherwise fall back to MIME-type groups.
+                //
+                // A double-null-terminated filter has the form:
+                //   "Label\0*.ext1;*.ext2\0All Files\0*.*\0\0"
+                // We store it in a std::string so embedded nulls are safe.
+                std::string filterBuf;
+                const char* filter = nullptr; // will point into filterBuf or a static
+
+                // Helper: append one filter entry (label + pattern) to filterBuf.
+                auto addEntry = [&](const std::string& label, const std::string& pattern) {
+                    filterBuf += label;  filterBuf += '\0';
+                    filterBuf += pattern; filterBuf += '\0';
+                };
+
+                // Parse individual ".ext" tokens from the accept string.
+                std::vector<std::string> exts;
+                {
+                    std::string tok;
+                    for (char ch : accept + ",") {
+                        if (ch == ',' || ch == ' ') {
+                            while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+                            if (tok.size() > 1 && tok[0] == '.') exts.push_back(tok);
+                            tok.clear();
+                        } else { tok += ch; }
+                    }
+                }
+
+                if (!exts.empty()) {
+                    // Build pattern from explicit extensions, e.g. "*.wav;*.fuz;*.xwm"
+                    std::string label = "Supported Files", pattern;
+                    for (auto& e : exts) {
+                        if (!pattern.empty()) pattern += ';';
+                        pattern += '*'; pattern += e;
+                    }
+                    addEntry(label, pattern);
+                    addEntry("All Files", "*.*");
+                    filterBuf += '\0'; // extra terminator
+                    filter = filterBuf.c_str();
+                } else {
+                    // No explicit extensions — fall back to MIME group or all-files.
+                    static const char kFiltAudio[] =
+                        "Audio Files\0*.mp3;*.wav;*.ogg;*.flac;*.m4a;*.aac;*.webm;*.fuz;*.xwm\0All Files\0*.*\0";
+                    static const char kFiltImage[] =
+                        "Image Files\0*.png;*.jpg;*.jpeg;*.gif;*.webp\0All Files\0*.*\0";
+                    static const char kFiltVideo[] =
+                        "Video Files\0*.mp4;*.webm;*.mkv;*.avi\0All Files\0*.*\0";
+                    static const char kFiltText[]  =
+                        "Text Files\0*.txt;*.log;*.csv;*.json\0All Files\0*.*\0";
+                    static const char kFiltAll[]   = "All Files\0*.*\0";
+                    if      (accept.find("audio") != std::string::npos) filter = kFiltAudio;
+                    else if (accept.find("image") != std::string::npos) filter = kFiltImage;
+                    else if (accept.find("video") != std::string::npos) filter = kFiltVideo;
+                    else if (accept.find("text")  != std::string::npos) filter = kFiltText;
+                    else filter = kFiltAll;
+                }
+                {
+                    char fileBuf[MAX_PATH] = {};
+                    OPENFILENAMEA ofn = {};
+                    ofn.lStructSize  = sizeof(ofn);
+                    ofn.hwndOwner    = nullptr;
+                    ofn.lpstrFilter  = filter;
+                    ofn.nFilterIndex = 1;
+                    ofn.lpstrFile    = fileBuf;
+                    ofn.nMaxFile     = MAX_PATH;
+                    ofn.lpstrTitle   = "Select file";
+                    ofn.Flags        = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+                    if (GetOpenFileNameA(&ofn)) {
+                        std::string fp = fileBuf;
+                        // Derive MIME type from extension
+                        std::string mime = "application/octet-stream";
+                        auto dot = fp.rfind('.');
+                        if (dot != std::string::npos) {
+                            std::string ext = fp.substr(dot + 1);
+                            for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                            if      (ext == "mp3")               mime = "audio/mpeg";
+                            else if (ext == "wav")               mime = "audio/wav";
+                            else if (ext == "ogg")               mime = "audio/ogg";
+                            else if (ext == "flac")              mime = "audio/flac";
+                            else if (ext == "m4a")               mime = "audio/mp4";
+                            else if (ext == "aac")               mime = "audio/aac";
+                            else if (ext == "webm")              mime = "audio/webm";
+                            else if (ext == "png")               mime = "image/png";
+                            else if (ext == "jpg" || ext == "jpeg") mime = "image/jpeg";
+                            else if (ext == "gif")               mime = "image/gif";
+                            else if (ext == "txt" || ext == "log") mime = "text/plain";
+                            else if (ext == "mp4")               mime = "video/mp4";
+                        }
+                        // Escape backslashes for JSON
+                        std::string jsonPath;
+                        for (char c : fp)
+                            if (c == '\\') jsonPath += "\\\\"; else jsonPath += c;
+                        body = "{\"path\":\"" + jsonPath + "\",\"mimeType\":\"" + mime + "\"}";
+                        logger::info("SkyrimNetDashboard: /open-dialog: user chose '{}'", fp);
+                    } else {
+                        body = "{\"cancelled\":true}";
+                        logger::info("SkyrimNetDashboard: /open-dialog: cancelled");
+                    }
+                }
+                contentType = "application/json";
+            } else if (path.substr(0, 10) == "/read-file") {
+                // Reads a local file (chosen via /open-dialog) and returns its bytes.
+                // ?path=<url-encoded-absolute-windows-path>
+                std::string filePath;
+                {
+                    auto qp = path.find('?');
+                    if (qp != std::string::npos) {
+                        std::string q = path.substr(qp + 1);
+                        auto pp = q.find("path=");
+                        if (pp != std::string::npos)
+                            filePath = UrlDecode(q.substr(pp + 5));
+                    }
+                }
+                // Security: only absolute Windows paths; no ".." traversal.
+                bool pathOk = filePath.size() >= 3
+                    && isalpha(static_cast<unsigned char>(filePath[0]))
+                    && filePath[1] == ':'
+                    && (filePath[2] == '\\' || filePath[2] == '/')
+                    && filePath.find("..") == std::string::npos;
+                if (!pathOk) {
+                    body           = "{\"error\":\"invalid path\"}";
+                    contentType    = "application/json";
+                    upstreamStatus = 400;
+                } else {
+                    std::ifstream ifs(filePath, std::ios::binary | std::ios::ate);
+                    if (!ifs) {
+                        body           = "{\"error\":\"cannot open file\"}";
+                        contentType    = "application/json";
+                        upstreamStatus = 404;
+                    } else {
+                        auto sz = static_cast<std::streamoff>(ifs.tellg());
+                        constexpr std::streamoff kMaxBytes = 256LL * 1024 * 1024;
+                        if (sz > kMaxBytes) {
+                            body           = "{\"error\":\"file too large\"}";
+                            contentType    = "application/json";
+                            upstreamStatus = 413;
+                        } else {
+                            ifs.seekg(0);
+                            body.resize(static_cast<std::size_t>(sz));
+                            ifs.read(body.data(), sz);
+                            // Content-Type from extension
+                            contentType = "application/octet-stream";
+                            auto dot = filePath.rfind('.');
+                            if (dot != std::string::npos) {
+                                std::string ext = filePath.substr(dot + 1);
+                                for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                                if      (ext == "mp3")               contentType = "audio/mpeg";
+                                else if (ext == "wav")               contentType = "audio/wav";
+                                else if (ext == "ogg")               contentType = "audio/ogg";
+                                else if (ext == "flac")              contentType = "audio/flac";
+                                else if (ext == "m4a")               contentType = "audio/mp4";
+                                else if (ext == "aac")               contentType = "audio/aac";
+                                else if (ext == "webm")              contentType = "audio/webm";
+                                else if (ext == "png")               contentType = "image/png";
+                                else if (ext == "jpg" || ext == "jpeg") contentType = "image/jpeg";
+                                else if (ext == "gif")               contentType = "image/gif";
+                                else if (ext == "mp4")               contentType = "video/mp4";
+                                else if (ext == "txt" || ext == "log") contentType = "text/plain; charset=utf-8";
+                            }
+                            logger::info("SkyrimNetDashboard: /read-file: served '{}' ({} bytes)", filePath, sz);
+                        }
+                    }
+                }
             } else if (path == "/clipboard-get") {
                 body        = GetClipboardTextW32();
                 contentType = "text/plain; charset=utf-8";
