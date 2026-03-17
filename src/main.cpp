@@ -1099,6 +1099,7 @@ html,body{width:100%;height:100%;background:transparent;overflow:hidden}
 .btn{display:flex;align-items:center;gap:4px;padding:4px 12px;background:#374151;border:none;border-radius:4px;color:#fff;font-size:12px;font-family:Consolas,"Courier New",monospace;cursor:pointer;pointer-events:auto}
 .btn.icon{padding:4px 7px}
 .btn:hover{background:#4b5563}
+.btn:disabled{opacity:.35;cursor:default}
 #XB{display:flex;align-items:center;padding:4px 8px;background:#dc2626;border:none;border-radius:4px;color:#fff;cursor:pointer}
 #XB:hover{background:#ef4444}
 #C{flex:1;overflow:hidden;min-height:0;border-radius:0 0 6px 6px;position:relative}
@@ -1137,6 +1138,8 @@ iframe{width:100%;height:100%;border:none;display:block}
     <div id="L">
       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
       <span>SkyrimNet</span>
+      <button class="btn icon" id="BB" title="Back" disabled><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button class="btn icon" id="FWB" title="Forward" disabled><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
       <button class="btn icon" id="HB" title="Home"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></button>
       <button class="btn icon" id="RB" title="Refresh"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
     </div>
@@ -1161,6 +1164,8 @@ iframe{width:100%;height:100%;border:none;display:block}
       RB=document.getElementById('RB'),
       SB=document.getElementById('SB'),
       ZL=document.getElementById('ZL'),
+      BB=document.getElementById('BB'),
+      FWB=document.getElementById('FWB'),
       OL=document.getElementById('OL'),
       FR=document.getElementById('snpd-frame');
   var fs=localStorage.getItem('snpd-fs')==='true';
@@ -1380,17 +1385,19 @@ iframe{width:100%;height:100%;border:none;display:block}
   // Ultralight may route iframe dialogs through the top-level window context,
   // so overriding here catches those cases too.
   var snpdFr=FR;
-  function snpdPatch(){try{var cw=snpdFr.contentWindow;if(!cw)return;cw.confirm=function(){return true;};cw.alert=function(){};cw.prompt=function(m,d){return d!==undefined?d:'';};cw.open=function(url){if(url)cw.location.href=url;return cw;};cw.document.addEventListener('wheel',function(e){if(!e.ctrlKey)return;e.preventDefault();e.stopPropagation();var delta=e.deltaY<0?0.1:-0.1;zoom=Math.min(3,Math.max(0.20,Math.round((zoom+delta)*100)/100));applyZoom();},{passive:false,capture:true});}catch(_){}}
+  function snpdPatch(){try{var cw=snpdFr.contentWindow;if(!cw)return;cw.confirm=function(){return true;};cw.alert=function(m){try{var d=cw.document,b=d.createElement('div');b.style.cssText='position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#991b1b;color:#fff;padding:8px 18px;border-radius:6px;font-size:13px;z-index:99999;max-width:84%;text-align:center;box-shadow:0 4px 14px #0008;cursor:pointer;';b.textContent=String(m||'');b.onclick=function(){b.remove();};d.body.appendChild(b);setTimeout(function(){try{b.remove();}catch(e){}},9000);}catch(e){}};cw.prompt=function(m,d){return d!==undefined?d:'';};cw.open=function(url,target,features){var loc={_h:url||''};try{Object.defineProperty(loc,'href',{get:function(){return loc._h;},set:function(u){loc._h=u;if(u&&u!=='about:blank'&&!stub.closed)setTimeout(function(){try{cw.location.href=u;}catch(e){}},0);},enumerable:true,configurable:true});}catch(e){loc.href=url||'';}loc.assign=function(u){loc.href=u;};loc.replace=function(u){loc.href=u;};var stub={closed:false,name:target||'',location:loc,document:{write:function(){},writeln:function(){},open:function(){return this;},close:function(){},createElement:function(){return document.createElement('span');}},close:function(){stub.closed=true;},focus:function(){},blur:function(){},postMessage:function(){}};return stub;};cw.close=function(){};
+  cw.document.addEventListener('wheel',function(e){if(!e.ctrlKey)return;e.preventDefault();e.stopPropagation();var delta=e.deltaY<0?0.1:-0.1;zoom=Math.min(3,Math.max(0.20,Math.round((zoom+delta)*100)/100));applyZoom();},{passive:false,capture:true});}catch(_){}}
   snpdFr.addEventListener('load',snpdPatch);
 )SHELL2"
     "(function(){"
     "var _lh='';"
-    "try{_lh=snpdFr.contentWindow.location.href;}catch(e){}"
+    "try{_lh=snpdFr.contentWindow.location.href;pushNav(_lh);}catch(e){}"
     "setInterval(function(){"
     "try{"
     "var h=snpdFr.contentWindow.location.href;"
     "if(h&&h!==_lh){"
     "_lh=h;"
+    "pushNav(h);"
     "fetch('/audio',{method:'POST',"
     "headers:{'Content-Type':'application/json'},"
     "body:JSON.stringify({action:'stop',src:''})}).catch(function(){});"
@@ -1399,6 +1406,15 @@ iframe{width:100%;height:100%;border:none;display:block}
     "},200);"
     "})();\n"
     R"SHELL3(
+
+  // ── Nav history (back / forward buttons) ────────────────────────────────────
+  var navHist=[],navIdx=-1;
+  function updNav(){BB.disabled=navIdx<1;FWB.disabled=navIdx>=navHist.length-1;}
+  function pushNav(u){if(!u||u===navHist[navIdx])return;navHist=navHist.slice(0,navIdx+1);navHist.push(u);navIdx++;updNav();}
+  BB.addEventListener('mousedown',function(e){e.stopPropagation();});
+  BB.addEventListener('click',function(e){e.stopPropagation();if(navIdx>0){navIdx--;try{snpdFr.contentWindow.location.href=navHist[navIdx];}catch(_){snpdFr.src=navHist[navIdx];}updNav();}});
+  FWB.addEventListener('mousedown',function(e){e.stopPropagation();});
+  FWB.addEventListener('click',function(e){e.stopPropagation();if(navIdx<navHist.length-1){navIdx++;try{snpdFr.contentWindow.location.href=navHist[navIdx];}catch(_){snpdFr.src=navHist[navIdx];}updNav();}});
 
   // ── Resize handles ─────────────────────────────────────────────────────────
   var rDir=null,rSX=0,rSY=0,rRect=null;
@@ -2087,9 +2103,11 @@ static bool TryStreamProxy(SOCKET client,
     auto processLine = [&](std::string& line) -> bool {
         // Detect TTS audio stream on first NDJSON line that looks like one.
         if (!isAudioStream &&
-                line.find("\"type\"") != std::string::npos &&
-                (line.find("\"segment\"") != std::string::npos ||
-                 line.find("\"status\"")  != std::string::npos)) {
+                // Require "audio":" to be present so we don't false-positive on
+                // other NDJSON streams (e.g. bulk-clone progress) that also use
+                // {"type":"segment"} or {"type":"status"} without audio data.
+                line.find("\"type\":\"segment\"") != std::string::npos &&
+                line.find("\"audio\":\"") != std::string::npos) {
             isAudioStream = true;
             ClearAudioQueue();        // flush any leftovers from a previous run
             EnsureAudioQueueRunning();
@@ -2097,7 +2115,7 @@ static bool TryStreamProxy(SOCKET client,
             // ClearAudioQueue from another thread it bumps s_aqSessionGen, making
             // myAqSession stale — all subsequent PushToAudioQueue calls will bail.
             myAqSession = s_aqSessionGen.load();
-            logger::info("SkyrimNetDashboard: TTS audio stream detected, C++ queue active");
+            logger::info("SkyrimNetDashboard: TTS audio stream detected on first audio segment, C++ queue active");
         }
 
         if (isAudioStream) {
@@ -2827,7 +2845,12 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     // bytes directly to the client so the browser's
                     // response.body.getReader() receives segments in real-time
                     // rather than waiting for the entire generation to complete.
-                    if (TryStreamProxy(client, proxyHost, proxyPort, method, path, reqCT, reqBody)) {
+                    // EXCLUDE bulk-clone and bulk-clone-cancel: those are REST
+                    // API calls whose responses must be buffered as JSON to be
+                    // consumed by response.json() in the UI.
+                    const bool isBulkClone = path.find("bulk-clone") != std::string::npos;
+                    if (!isBulkClone &&
+                        TryStreamProxy(client, proxyHost, proxyPort, method, path, reqCT, reqBody)) {
                         closesocket(client);
                         return;
                     }
