@@ -33,6 +33,10 @@ try{_fireOn(a[i],'ended');}catch(e){}
 }
 try{document.dispatchEvent(new Event('snpd:audioended'));}catch(e){}
 };
+// Called from C++ when test-TTS audio finishes (separate from diary TTS).
+window.__onTestTtsEnded=function(){
+try{document.dispatchEvent(new Event('snpd:testttsended'));}catch(e){}
+};
 // _pa: dispatch play/pause/stop to local proxy
 var _pa=function(action,src){
 try{

@@ -460,7 +460,9 @@ static WavInfo ParseWavHeader(const std::string& b)
 
 // Shared audio processing + playback: called from both PlayAudioUrl and PlayAudioRaw.
 // Handles FUZ stripping, RIFF size patching, format detection, and playback.
-static void PlayAudioBytes(std::string bytes, const std::string& ct)
+// testTts=true fires snpd:testttsended in the iframe instead of __onAudioEnded,
+// preventing diary TTS listeners from reacting to test audio completion.
+static void PlayAudioBytes(std::string bytes, const std::string& ct, bool testTts = false)
 {
     if (bytes.empty()) { logger::warn("SkyrimNetDashboard: PlayAudioBytes: empty, aborting"); return; }
 
@@ -610,18 +612,30 @@ static void PlayAudioBytes(std::string bytes, const std::string& ct)
             }
             logger::info("SkyrimNetDashboard: waveOut playback done gen={}", myGen);
 
-            // Notify JS (same logic as the MCI path below).
+            // Notify JS: for test TTS fire snpd:testttsended (safe custom event);
+            // for regular audio fire __onAudioEnded (advances diary TTS queue).
             if (s_audioGen.load() == myGen && s_PrismaUI && s_PrismaUI->IsValid(s_View)) {
-                s_PrismaUI->Invoke(s_View,
-                    "try{"
-                    "var _fr=document.getElementById('snpd-frame');"
-                    "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onAudioEnded)"
-                    "_fr.contentWindow.__onAudioEnded();"
-                    "}catch(e){}",
-                    nullptr);
-                logger::info("SkyrimNetDashboard: __onAudioEnded dispatched gen={}", myGen);
+                if (testTts) {
+                    s_PrismaUI->Invoke(s_View,
+                        "try{"
+                        "var _fr=document.getElementById('snpd-frame');"
+                        "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onTestTtsEnded)"
+                        "_fr.contentWindow.__onTestTtsEnded();"
+                        "}catch(e){}",
+                        nullptr);
+                    logger::info("SkyrimNetDashboard: __onTestTtsEnded dispatched gen={}", myGen);
+                } else {
+                    s_PrismaUI->Invoke(s_View,
+                        "try{"
+                        "var _fr=document.getElementById('snpd-frame');"
+                        "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onAudioEnded)"
+                        "_fr.contentWindow.__onAudioEnded();"
+                        "}catch(e){}",
+                        nullptr);
+                    logger::info("SkyrimNetDashboard: __onAudioEnded dispatched gen={}", myGen);
+                }
             } else {
-                logger::info("SkyrimNetDashboard: __onAudioEnded skipped gen={} current={}",
+                logger::info("SkyrimNetDashboard: audio notify skipped gen={} current={}",
                     myGen, s_audioGen.load());
             }
             return;
@@ -718,21 +732,28 @@ static void PlayAudioBytes(std::string bytes, const std::string& ct)
     logger::info("SkyrimNetDashboard: MCI playback done gen={}", myGen);
 
     // Notify JS only for the most recently requested segment.
-    // The audio bridge (and _paActive) live in the IFRAME's window context
-    // (injected via InjectPatches), not in the shell window context that
-    // Invoke() targets.  Reach through snpd-frame's contentWindow so the
-    // 'ended' events fire on the correct Audio instances.
     if (s_audioGen.load() == myGen && s_PrismaUI && s_PrismaUI->IsValid(s_View)) {
-        s_PrismaUI->Invoke(s_View,
-            "try{"
-            "var _fr=document.getElementById('snpd-frame');"
-            "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onAudioEnded)"
-            "_fr.contentWindow.__onAudioEnded();"
-            "}catch(e){}",
-            nullptr);
-        logger::info("SkyrimNetDashboard: __onAudioEnded dispatched gen={}", myGen);
+        if (testTts) {
+            s_PrismaUI->Invoke(s_View,
+                "try{"
+                "var _fr=document.getElementById('snpd-frame');"
+                "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onTestTtsEnded)"
+                "_fr.contentWindow.__onTestTtsEnded();"
+                "}catch(e){}",
+                nullptr);
+            logger::info("SkyrimNetDashboard: __onTestTtsEnded dispatched gen={}", myGen);
+        } else {
+            s_PrismaUI->Invoke(s_View,
+                "try{"
+                "var _fr=document.getElementById('snpd-frame');"
+                "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onAudioEnded)"
+                "_fr.contentWindow.__onAudioEnded();"
+                "}catch(e){}",
+                nullptr);
+            logger::info("SkyrimNetDashboard: __onAudioEnded dispatched gen={}", myGen);
+        }
     } else {
-        logger::info("SkyrimNetDashboard: __onAudioEnded skipped gen={} current={}",
+        logger::info("SkyrimNetDashboard: audio notify skipped gen={} current={}",
             myGen, s_audioGen.load());
     }
 }
@@ -763,11 +784,11 @@ static void PlayAudioUrl(std::string url)
 
 // Called from the /audio-raw endpoint -- JS fetched blob bytes and POSTed them
 // as raw binary so blob: URLs (e.g. TTS) work despite being browser-only objects.
-static void PlayAudioRaw(std::string bytes, std::string ct)
+static void PlayAudioRaw(std::string bytes, std::string ct, bool testTts = false)
 {
-    std::thread([bytes = std::move(bytes), ct = std::move(ct)]() mutable {
+    std::thread([bytes = std::move(bytes), ct = std::move(ct), testTts]() mutable {
         logger::info("SkyrimNetDashboard: audio-raw {} bytes, ct='{}'", bytes.size(), ct);
-        PlayAudioBytes(std::move(bytes), ct);
+        PlayAudioBytes(std::move(bytes), ct, testTts);
     }).detach();
 }
 
@@ -1828,9 +1849,9 @@ static std::string PatchBundle(std::string body)
                 "wt(!0),a.onended=()=>{ft(!1),setTimeout(()=>wt(!1),2e3),URL.revokeObjectURL(r)},"
                 "a.onerror=e=>{vt(\"Failed to play TTS audio\"),ft(!1),wt(!1),URL.revokeObjectURL(r)},"
                 "await a.play()",
-                // C++ intercept already fetched the audio and started playing it (fire-and-forget).
-                // Just clear the testing/playing states — no Promise/event wait needed.
-                "ft(!1),wt(!1)"
+                // C++ plays audio via waveOut and fires snpd:testttsended when done.
+                // Show playing state now; clear it when the event arrives.
+                "wt(!0),document.addEventListener('snpd:testttsended',function _snpdE1(){ft(!1),wt(!1),document.removeEventListener('snpd:testttsended',_snpdE1)})"
             },
             // Variant 2: state vars b/u/p, audio alias 'a'
             {
@@ -1838,7 +1859,7 @@ static std::string PatchBundle(std::string body)
                 "b(!0),a.onended=()=>{u(!1),setTimeout(()=>b(!1),2e3),URL.revokeObjectURL(r)},"
                 "a.onerror=e=>{p(\"Failed to play TTS audio\"),u(!1),b(!1),URL.revokeObjectURL(r)},"
                 "await a.play()",
-                "u(!1),b(!1)"
+                "b(!0),document.addEventListener('snpd:testttsended',function _snpdE2(){u(!1),b(!1),document.removeEventListener('snpd:testttsended',_snpdE2)})"
             },
             // Variant 3: state vars m/a/n, audio alias 'l'
             {
@@ -1846,7 +1867,7 @@ static std::string PatchBundle(std::string body)
                 "m(!0),l.onended=()=>{a(!1),setTimeout(()=>m(!1),2e3),URL.revokeObjectURL(r)},"
                 "l.onerror=e=>{n(\"Failed to play TTS audio\"),a(!1),m(!1),URL.revokeObjectURL(r)},"
                 "await l.play()",
-                "a(!1),m(!1)"
+                "m(!0),document.addEventListener('snpd:testttsended',function _snpdE3(){a(!1),m(!1),document.removeEventListener('snpd:testttsended',_snpdE3)})"
             },
         };
         int patchCount = 0;
@@ -2474,7 +2495,25 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     // Fetch metadata synchronously (fast, ~1s for TTS generation,
                     // returns a small JSON payload — well within Ultralight's timeout).
                     auto [metaBody, metaCt, metaSc] = FetchResource(proxyHost, proxyPort, method, path, reqCT, reqBody);
-                    body           = metaBody;   // return real JSON to browser
+                    // Strip "audio_id" from the JSON before returning to the browser.
+                    // The JS would otherwise make a GET /test?api=audio&id=NNN request
+                    // which returns binary audio bytes — those crash Ultralight when
+                    // buffered in the renderer's fetch response handler.
+                    // Our C++ background thread fetches the audio independently.
+                    std::string safeBody = metaBody;
+                    {
+                        auto aid = safeBody.find("\"audio_id\":");
+                        if (aid != std::string::npos) {
+                            // Find value start (skip optional whitespace after colon)
+                            auto vs = safeBody.find('"', aid + 11);
+                            if (vs != std::string::npos) {
+                                auto ve = safeBody.find('"', vs + 1);
+                                if (ve != std::string::npos)
+                                    safeBody.replace(vs + 1, ve - vs - 1, ""); // "audio_id":""
+                            }
+                        }
+                    }
+                    body           = safeBody;
                     contentType    = std::move(metaCt);
                     upstreamStatus = metaSc;
                     // Extract audio_id and fetch+play audio on background thread
@@ -2500,7 +2539,7 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                             if (!audioBytes.empty() && audioSc >= 200 && audioSc < 300) {
                                 logger::info("SkyrimNetDashboard: test-TTS playing {} bytes ct='{}'",
                                     audioBytes.size(), audioCt);
-                                PlayAudioRaw(std::move(audioBytes), audioCt);
+                                PlayAudioRaw(std::move(audioBytes), audioCt, true);
                             } else {
                                 logger::warn("SkyrimNetDashboard: test-TTS audio fetch {} for {}", audioSc, audioPath);
                             }
@@ -2515,7 +2554,7 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                         if (!audioBytes.empty() && audioSc >= 200 && audioSc < 300) {
                             logger::info("SkyrimNetDashboard: test-TTS playing {} bytes ct='{}'",
                                 audioBytes.size(), audioCt);
-                            PlayAudioRaw(std::move(audioBytes), audioCt);
+                            PlayAudioRaw(std::move(audioBytes), audioCt, true);
                         } else {
                             logger::warn("SkyrimNetDashboard: test-TTS upstream {} for {}", audioSc, p);
                         }
@@ -2524,6 +2563,17 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     contentType    = "application/json";
                     upstreamStatus = 200;
                 }
+            } else if (
+                // Safety net: if the browser somehow still requests the audio file
+                // (e.g. audio_id stripping failed), intercept and return a stub so
+                // binary audio bytes never reach Ultralight's response buffer.
+                method == "GET" && path.find("/test") == 0 &&
+                path.find("api=audio") != std::string::npos
+            ) {
+                logger::info("SkyrimNetDashboard: test audio stub intercept: {}", path);
+                body        = "{}";
+                contentType = "application/json";
+                upstreamStatus = 200;
             } else if (path == "/proxy" || path == "/proxy/") {
                 body = FetchAndInject(proxyHost, proxyPort);
             } else {
