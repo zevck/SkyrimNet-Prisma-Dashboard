@@ -10,8 +10,10 @@ Brings the SkyrimNet web dashboard directly into Skyrim, no alt-tabbing required
 
 ## Requirements
 
-- **SkyrimNet** - the AI companion mod this dashboard controls
-- **PrismaUI** - the in-game browser overlay framework this mod relies on
+- [SkyrimNet](https://github.com/MinLL/SkyrimNet-GamePlugin)
+- [PrismaUI](https://www.nexusmods.com/skyrimspecialedition/mods/148718)
+- [SKSE](https://skse.silverlock.org/)
+- [Address Library](https://www.nexusmods.com/skyrimspecialedition/mods/32444)
 
 ---
 
