@@ -1,6 +1,6 @@
 # SkyrimNet Prisma Dashboard
 
-Brings the SkyrimNet web dashboard directly into Skyrim — no alt-tabbing required.
+Brings the SkyrimNet web dashboard directly into Skyrim, no alt-tabbing required.
 
 <p align="center">
   <img src="images/prismadashboard.jpg">
