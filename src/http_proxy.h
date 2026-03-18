@@ -286,11 +286,18 @@ static std::string IdentBwd(const std::string& s, std::size_t pos) {
 
 static std::string PatchBundle(std::string body)
 {
+    std::string patches;  // accumulates names of applied patches for summary log
+    auto mark = [&](const char* name) {
+        if (!patches.empty()) patches += ", ";
+        patches += name;
+    };
+
     // ── Playback banner: fix h.cardBg → h.colors.cardBg ──────────────────────
     // The diary playback banner accesses h.cardBg / h.border directly on the
     // theme object, but those live under h.colors.cardBg / h.colors.border.
     // Result: both class slots are undefined → fully transparent background.
     // Also remove the pointless backdrop-blur-lg (Ultralight ignores it).
+    bool hasOpacity = body.find("glassEffect:\"bg-white/30") != std::string::npos;
     body = ReplaceAll(std::move(body),
         "fixed bottom-0 left-0 right-0 z-50 ${h.cardBg} ${h.border} border-t shadow-2xl backdrop-blur-lg",
         "fixed bottom-0 left-0 right-0 z-50 ${h.colors.cardBg} ${h.colors.border} border-t shadow-2xl");
@@ -320,10 +327,7 @@ static std::string PatchBundle(std::string body)
     body = ReplaceAll(std::move(body),
         "\"fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50\"",
         "\"fixed inset-0 bg-black/80 flex items-center justify-center z-50\"");
-    {
-        auto cnt = [](const std::string&) { return 0; }; (void)cnt;
-        logger::info("SkyrimNetDashboard: PatchBundle: patched glassEffect/cardBg opacity");
-    }
+    if (hasOpacity) mark("opacity");
 
     // ── Log file download fix ─────────────────────────────────────────────────
     // The app's download handler creates a blob: URL then calls a.click() to
@@ -383,17 +387,15 @@ static std::string PatchBundle(std::string body)
                         "}catch(err){console.error('snpd save-file failed',err);}"
                         "})()";
                     body.replace(cp, constructed.size(), rep);
-                    logger::info("SkyrimNetDashboard: PatchBundle: log download patched (blob={} resp={} url={} elem={} fname={})",
-                        blobVar, respVar, urlVar, elemVar, fnameVar);
+                    mark("log-download");
                 } else {
-                    logger::warn("SkyrimNetDashboard: PatchBundle: log download reconstructed needle not found");
+                    logger::warn("PatchBundle: log download needle not found (vars: blob={} resp={} url={} elem={} fname={})",
+                        blobVar, respVar, urlVar, elemVar, fnameVar);
                 }
             } else {
-                logger::warn("SkyrimNetDashboard: PatchBundle: log download vars incomplete (blob={} resp={} url={} elem={} fname={})",
+                logger::warn("PatchBundle: log download vars incomplete (blob={} resp={} url={} elem={} fname={})",
                     blobVar, respVar, urlVar, elemVar, fnameVar);
             }
-        } else {
-            logger::warn("SkyrimNetDashboard: PatchBundle: log download anchor not found");
         }
     }
 
@@ -415,9 +417,7 @@ static std::string PatchBundle(std::string body)
         auto p2 = body.find(n2);
         if (p2 != std::string::npos) {
             body.replace(p2, n2.size(), r2);
-            logger::info("SkyrimNetDashboard: PatchBundle: complete-handler downloadUrl redirected");
-        } else {
-            logger::warn("SkyrimNetDashboard: PatchBundle: complete-handler needle not found");
+            mark("diary-url");
         }
     }
     // Download button: replace the <a download>+click pattern with our
@@ -469,20 +469,18 @@ static std::string PatchBundle(std::string body)
                             "setTimeout(function(){d.style.opacity='0';setTimeout(function(){d.remove();},500);},3500);"
                             "}catch(err){console.error('snpd diary save failed',err);}})()}";
                         body.replace(cp, constructed.size(), rep);
-                        logger::info("SkyrimNetDashboard: PatchBundle: diary download button patched (el={} url={} fname={})",
-                            elVar, urlVar, fnameVar);
+                        mark("diary-download");
                     } else {
-                        logger::warn("SkyrimNetDashboard: PatchBundle: diary download button reconstructed needle not found");
+                        logger::warn("PatchBundle: diary download needle not found (el={} url={} fname={})",
+                            elVar, urlVar, fnameVar);
                     }
                 } else {
-                    logger::warn("SkyrimNetDashboard: PatchBundle: diary download button vars incomplete (el={} url={} fname={})",
+                    logger::warn("PatchBundle: diary download vars incomplete (el={} url={} fname={})",
                         elVar, urlVar, fnameVar);
                 }
             } else {
-                logger::warn("SkyrimNetDashboard: PatchBundle: diary download .download= not found near anchor");
+                logger::warn("PatchBundle: diary download .download= not found near anchor");
             }
-        } else {
-            logger::warn("SkyrimNetDashboard: PatchBundle: diary download button anchor not found");
         }
     }
 
@@ -516,17 +514,15 @@ static std::string PatchBundle(std::string body)
                         "clearTimeout(self._snpdCmTmr);self._snpdCmTmr=setTimeout(()=>" +
                         cbVar + "(_ss.doc.toString()),600)}";
                     body.replace(cp, constructed.size(), rep);
-                    logger::info("SkyrimNetDashboard: PatchBundle: CodeMirror debounce applied (update={} cb={})",
-                        updateVar, cbVar);
+                    mark("codemirror-debounce");
                 } else {
-                    logger::warn("SkyrimNetDashboard: PatchBundle: CodeMirror reconstructed needle not found");
+                    logger::warn("PatchBundle: CodeMirror needle not found (update={} text={} cb={})",
+                        updateVar, textVar, cbVar);
                 }
             } else {
-                logger::warn("SkyrimNetDashboard: PatchBundle: CodeMirror vars incomplete (update={} text={} cb={})",
+                logger::warn("PatchBundle: CodeMirror vars incomplete (update={} text={} cb={})",
                     updateVar, textVar, cbVar);
             }
-        } else {
-            logger::warn("SkyrimNetDashboard: PatchBundle: CodeMirror anchor not found");
         }
     }
     // Patch 2: Replace synchronous prompt() call in "Add new prompt" handler with
@@ -543,7 +539,7 @@ static std::string PatchBundle(std::string body)
         auto pos2 = body.find(promptNeedle);
         if (pos2 != std::string::npos) {
             body.replace(pos2, promptNeedle.size(), promptReplacement);
-            logger::info("SkyrimNetDashboard: PatchBundle: prompt() dialog patch applied");
+            mark("prompt-dialog");
         }
     }
 
@@ -574,10 +570,11 @@ static std::string PatchBundle(std::string body)
             ++patchCount;
         }
         if (patchCount > 0)
-            logger::info("SkyrimNetDashboard: PatchBundle: test TTS audio patched ({} via regex)", patchCount);
-        else
-            logger::warn("SkyrimNetDashboard: PatchBundle: test TTS audio regex found no matches");
+            mark("tts-audio");
     }
+
+    if (!patches.empty())
+        logger::info("PatchBundle: applied [{}]", patches);
 
     return body;
 }
@@ -1568,19 +1565,8 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     upstreamStatus = resSc;
                     if (contentType.find("text/html") != std::string::npos && !body.empty())
                         body = InjectPatches(std::move(body));
-                    else if (contentType.find("javascript") != std::string::npos && !body.empty()) {
+                    else if (contentType.find("javascript") != std::string::npos && !body.empty())
                         body = PatchBundle(std::move(body));
-                        // One-shot dump of each patched JS bundle for offline verification.
-                        static std::atomic<int> s_bundleDumpIdx{0};
-                        if (s_bundleDumpIdx.load() < 10) {
-                            auto idx = s_bundleDumpIdx.fetch_add(1);
-                            auto dp = std::filesystem::temp_directory_path() /
-                                ("snpd_patched_" + std::to_string(idx) + ".js");
-                            std::ofstream(dp, std::ios::binary) << body;
-                            logger::info("SkyrimNetDashboard: dumped patched JS #{} ({} bytes) to {}",
-                                idx, body.size(), dp.string());
-                        }
-                    }
                     else if (contentType.find("text/css") != std::string::npos && !body.empty())
                         body = PatchCSS(std::move(body));
                     // For API calls (non-GET): if the body is empty and upstream
