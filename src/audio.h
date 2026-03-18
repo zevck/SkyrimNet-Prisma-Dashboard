@@ -291,7 +291,9 @@ static WavInfo ParseWavHeader(const std::string& b)
 // Handles FUZ stripping, RIFF size patching, format detection, and playback.
 // testTts=true fires snpd:testttsended in the iframe instead of __onAudioEnded,
 // preventing diary TTS listeners from reacting to test audio completion.
-static void PlayAudioBytes(std::string bytes, const std::string& ct, bool testTts = false)
+// notifyOnCancel=true fires the end event even when pre-empted by a newer
+// segment — used by direct (non-queue) plays so UI buttons always reset.
+static void PlayAudioBytes(std::string bytes, const std::string& ct, bool testTts = false, bool notifyOnCancel = false)
 {
     if (bytes.empty()) { logger::warn("SkyrimNetDashboard: PlayAudioBytes: empty, aborting"); return; }
 
@@ -469,8 +471,22 @@ static void PlayAudioBytes(std::string bytes, const std::string& ct, bool testTt
                     logger::info("SkyrimNetDashboard: __onAudioEnded dispatched gen={}", myGen);
                 }
             } else {
-                logger::info("SkyrimNetDashboard: audio notify skipped gen={} current={}",
-                    myGen, s_audioGen.load());
+                if (notifyOnCancel && s_PrismaUI && s_PrismaUI->IsValid(s_View)) {
+                    // Pre-empted direct play: still notify so UI buttons reset.
+                    s_PrismaUI->Invoke(s_View,
+                        testTts ?
+                        "try{var _fr=document.getElementById('snpd-frame');"
+                        "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onTestTtsEnded)"
+                        "_fr.contentWindow.__onTestTtsEnded();}catch(e){}" :
+                        "try{var _fr=document.getElementById('snpd-frame');"
+                        "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onAudioEnded)"
+                        "_fr.contentWindow.__onAudioEnded();}catch(e){}",
+                        nullptr);
+                    logger::info("SkyrimNetDashboard: audio notify-on-cancel (waveOut) gen={}", myGen);
+                } else {
+                    logger::info("SkyrimNetDashboard: audio notify skipped gen={} current={}",
+                        myGen, s_audioGen.load());
+                }
             }
             return;
         }
@@ -587,8 +603,22 @@ static void PlayAudioBytes(std::string bytes, const std::string& ct, bool testTt
             logger::info("SkyrimNetDashboard: __onAudioEnded dispatched gen={}", myGen);
         }
     } else {
-        logger::info("SkyrimNetDashboard: audio notify skipped gen={} current={}",
-            myGen, s_audioGen.load());
+        if (notifyOnCancel && s_PrismaUI && s_PrismaUI->IsValid(s_View)) {
+            // Pre-empted direct play: still notify so UI buttons reset.
+            s_PrismaUI->Invoke(s_View,
+                testTts ?
+                "try{var _fr=document.getElementById('snpd-frame');"
+                "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onTestTtsEnded)"
+                "_fr.contentWindow.__onTestTtsEnded();}catch(e){}" :
+                "try{var _fr=document.getElementById('snpd-frame');"
+                "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onAudioEnded)"
+                "_fr.contentWindow.__onAudioEnded();}catch(e){}",
+                nullptr);
+            logger::info("SkyrimNetDashboard: audio notify-on-cancel (MCI) gen={}", myGen);
+        } else {
+            logger::info("SkyrimNetDashboard: audio notify skipped gen={} current={}",
+                myGen, s_audioGen.load());
+        }
     }
 }
 
@@ -612,7 +642,7 @@ static void PlayAudioUrl(std::string url)
             return;
         }
 
-        PlayAudioBytes(std::move(bytes), ct);
+        PlayAudioBytes(std::move(bytes), ct, /*testTts=*/false, /*notifyOnCancel=*/true);
     }).detach();
 }
 
@@ -622,7 +652,7 @@ static void PlayAudioRaw(std::string bytes, std::string ct, bool testTts = false
 {
     std::thread([bytes = std::move(bytes), ct = std::move(ct), testTts]() mutable {
         logger::info("SkyrimNetDashboard: audio-raw {} bytes, ct='{}'", bytes.size(), ct);
-        PlayAudioBytes(std::move(bytes), ct, testTts);
+        PlayAudioBytes(std::move(bytes), ct, testTts, /*notifyOnCancel=*/true);
     }).detach();
 }
 
@@ -797,6 +827,15 @@ static void OnAudioMessage(const char* json)
             ClearAudioQueue();
         else
             StopAudio();
+        // Notify JS that playback ended so UI components (e.g. voice sample
+        // play buttons) reset their state — they only revert on __onAudioEnded
+        // which PlayAudioBytes skips when pre-empted by a gen bump.
+        if (s_PrismaUI && s_PrismaUI->IsValid(s_View))
+            s_PrismaUI->Invoke(s_View,
+                "try{var _fr=document.getElementById('snpd-frame');"
+                "if(_fr&&_fr.contentWindow&&_fr.contentWindow.__onAudioEnded)"
+                "_fr.contentWindow.__onAudioEnded();}catch(e){}",
+                nullptr);
     } else {
         logger::warn("SkyrimNetDashboard: audio unrecognised action='{}' src='{}'", action, src);
     }

@@ -953,9 +953,6 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 }
             }
 
-            // Diagnostic: log every incoming request so we can see what the browser sends.
-            logger::info("SkyrimNetDashboard: >> {} {}", method, path);
-
             // Session-token gate: sensitive endpoints require the auth cookie.
             // The cookie is set automatically when /shell is first loaded.
             bool needsToken = path.substr(0, 10) == "/save-file"
