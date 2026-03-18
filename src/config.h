@@ -11,7 +11,7 @@
 
 struct DashboardSettings {
     // [Dashboard]
-    std::string url          = "http://192.168.50.88:8080/";
+    std::string url          = "http://localhost:8080/";
     std::string lastPage     = "";
     int         hotKey       = 0x3E;  // DX scancode — default F4
     bool        keepBg       = false; // keep page alive when closed
@@ -130,7 +130,7 @@ static void LoadSettings()
         return static_cast<int>(GetPrivateProfileIntA("Dashboard", key, def, s_iniPath.c_str()));
     };
 
-    s_cfg.url         = readStr("URL",    "http://192.168.50.88:8080/");
+    s_cfg.url         = readStr("URL",    "http://localhost:8080/");
     s_cfg.lastPage    = readStr("LastPage", s_cfg.url.c_str());
     s_cfg.hotKey      = readInt("HotKey",         0x3E);
     s_cfg.keepBg      = readInt("KeepBackground", 0) != 0;

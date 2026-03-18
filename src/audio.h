@@ -2,7 +2,7 @@
 // ── Runtime globals + audio subsystem ──────────────────────────────────────────
 static constexpr uint32_t    ESC_KEY       = 0x01; // Escape
 static constexpr uint32_t    INSPECTOR_KEY = 0x3F; // F5
-static uint32_t              s_toggleKey   = 0x3E; // runtime toggle key, set from s_cfg at startup
+static std::atomic<uint32_t>  s_toggleKey{0x3E}; // runtime toggle key, set from s_cfg at startup
 
 static PRISMA_UI_API::IVPrismaUI1* s_PrismaUI     = nullptr;
 static PrismaView                  s_View         = 0;
@@ -104,10 +104,7 @@ AudioParseUrl(const std::string& url)
     return { host, port, path };
 }
 
-// WAV playback buffer -- must stay alive for the duration of async PlaySound.
-// Swapped only after stopping current playback, so no data race.
-static std::mutex  s_wavBufMtx;
-static std::string s_wavBuf;
+
 
 // Monotonically-increasing generation stamp: each PlayAudioBytes call claims a slot
 // before stopping the previous segment.  Only the latest generation fires

@@ -275,15 +275,15 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     logger::info("SkyrimNetDashboard: Shell view created at {} (iframe -> {})", shellUrl, startUrl);
 
     // 6. Register hotkey to toggle the overlay
-    s_toggleKey    = static_cast<uint32_t>(s_cfg.hotKey);
+    s_toggleKey.store(static_cast<uint32_t>(s_cfg.hotKey));
     KeyHandler::RegisterSink();
     s_toggleHandle = KeyHandler::GetSingleton()->Register(
-        s_toggleKey, KeyEventType::KEY_DOWN, OnToggle);
+        s_toggleKey.load(), KeyEventType::KEY_DOWN, OnToggle);
     [[maybe_unused]] auto escHandle = KeyHandler::GetSingleton()->Register(
         ESC_KEY, KeyEventType::KEY_DOWN, OnClose);
 
     logger::info("SkyrimNetDashboard: Ready. {} = open/close.",
-        DxKeyName(s_toggleKey));
+        DxKeyName(s_toggleKey.load()));
 }
 
 // Declare the plugin to SKSE for all runtime variants (SE/AE/VR).

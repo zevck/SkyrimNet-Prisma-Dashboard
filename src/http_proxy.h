@@ -268,6 +268,22 @@ static std::string ReplaceAll(std::string body, const std::string& needle, const
     return body;
 }
 
+// ── Identifier extraction helpers for manual pattern matching ───────────────
+// Reads a JS identifier (\w+) forwards from `pos`.
+static std::string IdentFwd(const std::string& s, std::size_t pos) {
+    std::string id;
+    while (pos < s.size() && (isalnum(static_cast<unsigned char>(s[pos])) || s[pos] == '_' || s[pos] == '$'))
+        id += s[pos++];
+    return id;
+}
+// Reads a JS identifier backwards, ending just before `pos`.
+static std::string IdentBwd(const std::string& s, std::size_t pos) {
+    std::string id;
+    while (pos > 0 && (isalnum(static_cast<unsigned char>(s[pos - 1])) || s[pos - 1] == '_' || s[pos - 1] == '$'))
+        id = s[--pos] + id;
+    return id;
+}
+
 static std::string PatchBundle(std::string body)
 {
     // ── Playback banner: fix h.cardBg → h.colors.cardBg ──────────────────────
@@ -317,34 +333,67 @@ static std::string PatchBundle(std::string body)
     // POST it directly to our /save-file proxy endpoint, which writes the file
     // to Documents\SkyrimNet Logs\ and returns JSON {saved,path}.  A toast
     // shows the saved path — no navigation ever happens.
+    // Variable names are extracted from structural anchors at runtime so the
+    // patch survives minifier renames.
     {
-        static const std::string dlNeedle =
-            "const s=await t.blob(),r=window.URL.createObjectURL(s),a=document.createElement(\"a\");a.href=r,a.download=e,document.body.appendChild(a),a.click(),window.URL.revokeObjectURL(r),document.body.removeChild(a)";
-        static const std::string dlReplace =
-            "const s=await t.blob();"
-            "await(async function(){"
-            "try{"
-            // First ask C++ to open a native Save-As dialog
-            "const dr=await fetch('/save-dialog?name='+encodeURIComponent(e));"
-            "const dj=await dr.json();"
-            "if(dj.cancelled)return;"
-            // User chose a path — POST the bytes there
-            "const ab=await s.arrayBuffer();"
-            "const jr=await fetch('/save-file?path='+encodeURIComponent(dj.path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:ab});"
-            "const j=await jr.json();"
-            "const d=document.createElement('div');"
-            "d.style.cssText='position:fixed;bottom:20px;right:20px;z-index:2147483647;padding:10px 16px;border-radius:6px;font-size:12px;font-family:Consolas,monospace;color:#fff;pointer-events:none;max-width:420px;word-break:break-all;transition:opacity 0.4s;'+(j&&j.saved?'background:#16a34a;border:1px solid #15803d;':'background:#dc2626;border:1px solid #b91c1c;');"
-            "d.textContent=j&&j.saved?'\\u2713 Saved: '+(j.path||e):'Save failed: '+(j.error||'unknown');"
-            "document.body.appendChild(d);"
-            "setTimeout(function(){d.style.opacity='0';setTimeout(function(){d.remove();},500);},3500);"
-            "}catch(err){console.error('snpd save-file failed',err);}"
-            "})()";
-        auto p = body.find(dlNeedle);
-        if (p != std::string::npos) {
-            body.replace(p, dlNeedle.size(), dlReplace);
-            logger::info("SkyrimNetDashboard: PatchBundle: patched log download anchor");
+        static const std::string anchor = "=window.URL.createObjectURL(";
+        auto ap = body.find(anchor);
+        if (ap != std::string::npos) {
+            std::string urlVar  = IdentBwd(body, ap);
+            std::string blobVar = IdentFwd(body, ap + anchor.size());
+            auto awaitPos = body.rfind("=await ", ap);
+            std::string respVar = (awaitPos != std::string::npos)
+                ? IdentFwd(body, awaitPos + 7) : "";
+            auto elemPos = body.find("=document.createElement(", ap);
+            std::string elemVar = (elemPos != std::string::npos)
+                ? IdentBwd(body, elemPos) : "";
+            auto dlPos = body.find(".download=", ap);
+            std::string fnameVar = (dlPos != std::string::npos)
+                ? IdentFwd(body, dlPos + 10) : "";
+
+            if (!urlVar.empty() && !blobVar.empty() && !respVar.empty() &&
+                !elemVar.empty() && !fnameVar.empty()) {
+                // Reconstruct the exact needle from extracted variable names.
+                std::string constructed =
+                    "const " + blobVar + "=await " + respVar + ".blob()," +
+                    urlVar + "=window.URL.createObjectURL(" + blobVar + ")," +
+                    elemVar + "=document.createElement(\"a\");" +
+                    elemVar + ".href=" + urlVar + "," +
+                    elemVar + ".download=" + fnameVar + "," +
+                    "document.body.appendChild(" + elemVar + ")," +
+                    elemVar + ".click(),window.URL.revokeObjectURL(" + urlVar + ")," +
+                    "document.body.removeChild(" + elemVar + ")";
+                auto cp = body.find(constructed);
+                if (cp != std::string::npos) {
+                    std::string rep =
+                        "const " + blobVar + "=await " + respVar + ".blob();"
+                        "await(async function(){"
+                        "try{"
+                        "const dr=await fetch('/save-dialog?name='+encodeURIComponent(" + fnameVar + "));"
+                        "const dj=await dr.json();"
+                        "if(dj.cancelled)return;"
+                        "const ab=await " + blobVar + ".arrayBuffer();"
+                        "const jr=await fetch('/save-file?path='+encodeURIComponent(dj.path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:ab});"
+                        "const j=await jr.json();"
+                        "const d=document.createElement('div');"
+                        "d.style.cssText='position:fixed;bottom:20px;right:20px;z-index:2147483647;padding:10px 16px;border-radius:6px;font-size:12px;font-family:Consolas,monospace;color:#fff;pointer-events:none;max-width:420px;word-break:break-all;transition:opacity 0.4s;'+(j&&j.saved?'background:#16a34a;border:1px solid #15803d;':'background:#dc2626;border:1px solid #b91c1c;');"
+                        "d.textContent=j&&j.saved?'\\u2713 Saved: '+(j.path||" + fnameVar + "):'Save failed: '+(j.error||'unknown');"
+                        "document.body.appendChild(d);"
+                        "setTimeout(function(){d.style.opacity='0';setTimeout(function(){d.remove();},500);},3500);"
+                        "}catch(err){console.error('snpd save-file failed',err);}"
+                        "})()";
+                    body.replace(cp, constructed.size(), rep);
+                    logger::info("SkyrimNetDashboard: PatchBundle: log download patched (blob={} resp={} url={} elem={} fname={})",
+                        blobVar, respVar, urlVar, elemVar, fnameVar);
+                } else {
+                    logger::warn("SkyrimNetDashboard: PatchBundle: log download reconstructed needle not found");
+                }
+            } else {
+                logger::warn("SkyrimNetDashboard: PatchBundle: log download vars incomplete (blob={} resp={} url={} elem={} fname={})",
+                    blobVar, respVar, urlVar, elemVar, fnameVar);
+            }
         } else {
-            logger::warn("SkyrimNetDashboard: PatchBundle: log download anchor needle not found");
+            logger::warn("SkyrimNetDashboard: PatchBundle: log download anchor not found");
         }
     }
 
@@ -373,48 +422,113 @@ static std::string PatchBundle(std::string body)
     }
     // Download button: replace the <a download>+click pattern with our
     // fetch → /save-dialog → /save-file flow (same as log downloads).
-    // Needle is unique: the template-literal filename ending + click sequence.
+    // Variable names extracted at runtime via structural anchors.
+    // Anchor on ".download=" near the diary template literal, then replace
+    // just the download-link mechanism (EL.download=…removeChild(EL)}).
     {
-        static const std::string dlDiaryNeedle =
-            R"(}_${s.id}.${r}`;e.download=a,document.body.appendChild(e),e.click(),document.body.removeChild(e)})";
-        static const std::string dlDiaryReplace =
-            R"(}_${s.id}.${r}`;)"
-            "(async function(){"
-            "try{"
-            "const dr=await fetch('/save-dialog?name='+encodeURIComponent(a));"
-            "const dj=await dr.json();"
-            "if(dj.cancelled)return;"
-            "const ab=await(await fetch(n)).arrayBuffer();"
-            "const jr=await fetch('/save-file?path='+encodeURIComponent(dj.path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:ab});"
-            "const j=await jr.json();"
-            "const d=document.createElement('div');"
-            "d.style.cssText='position:fixed;bottom:20px;right:20px;z-index:2147483647;padding:10px 16px;border-radius:6px;font-size:12px;font-family:Consolas,monospace;color:#fff;pointer-events:none;max-width:420px;word-break:break-all;transition:opacity 0.4s;'+(j&&j.saved?'background:#16a34a;border:1px solid #15803d;':'background:#dc2626;border:1px solid #b91c1c;');"
-            "d.textContent=j&&j.saved?'\\u2713 Saved: '+(j.path||a):'Save failed: '+(j.error||'unknown');"
-            "document.body.appendChild(d);"
-            "setTimeout(function(){d.style.opacity='0';setTimeout(function(){d.remove();},500);},3500);"
-            R"(}catch(err){console.error('snpd diary save failed',err);}})()})";
-        auto dp = body.find(dlDiaryNeedle);
-        if (dp != std::string::npos) {
-            body.replace(dp, dlDiaryNeedle.size(), dlDiaryReplace);
-            logger::info("SkyrimNetDashboard: PatchBundle: diary download button patched");
+        // Use ".id}." to locate the ternary (memory/diary filename) region.
+        static const std::string anchor = ".id}.";
+        auto ap = body.find(anchor);
+        if (ap != std::string::npos) {
+            // Find the nearest .download= after the template ternary.
+            auto dlPos = body.find(".download=", ap);
+            if (dlPos != std::string::npos && dlPos - ap < 200) {
+                std::string elVar    = IdentBwd(body, dlPos);
+                std::string fnameVar = IdentFwd(body, dlPos + 10);
+                // URL var: find "EL.href=URL" before the template region.
+                std::string urlVar;
+                if (!elVar.empty()) {
+                    auto hrefStr = elVar + ".href=";
+                    auto hrefPos = body.rfind(hrefStr, ap);
+                    if (hrefPos != std::string::npos)
+                        urlVar = IdentFwd(body, hrefPos + hrefStr.size());
+                }
+
+                if (!elVar.empty() && !fnameVar.empty() && !urlVar.empty()) {
+                    // Needle: just the download-link mechanism ending with }
+                    // (arrow function body close — NOT })  ).
+                    std::string constructed =
+                        elVar + ".download=" + fnameVar + "," +
+                        "document.body.appendChild(" + elVar + ")," +
+                        elVar + ".click(),document.body.removeChild(" + elVar + ")}";
+                    auto cp = body.find(constructed, ap);
+                    if (cp != std::string::npos) {
+                        std::string rep =
+                            "(async function(){"
+                            "try{"
+                            "const dr=await fetch('/save-dialog?name='+encodeURIComponent(" + fnameVar + "));"
+                            "const dj=await dr.json();"
+                            "if(dj.cancelled)return;"
+                            "const ab=await(await fetch(" + urlVar + ")).arrayBuffer();"
+                            "const jr=await fetch('/save-file?path='+encodeURIComponent(dj.path),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:ab});"
+                            "const j=await jr.json();"
+                            "const d=document.createElement('div');"
+                            "d.style.cssText='position:fixed;bottom:20px;right:20px;z-index:2147483647;padding:10px 16px;border-radius:6px;font-size:12px;font-family:Consolas,monospace;color:#fff;pointer-events:none;max-width:420px;word-break:break-all;transition:opacity 0.4s;'+(j&&j.saved?'background:#16a34a;border:1px solid #15803d;':'background:#dc2626;border:1px solid #b91c1c;');"
+                            "d.textContent=j&&j.saved?'\\u2713 Saved: '+(j.path||" + fnameVar + "):'Save failed: '+(j.error||'unknown');"
+                            "document.body.appendChild(d);"
+                            "setTimeout(function(){d.style.opacity='0';setTimeout(function(){d.remove();},500);},3500);"
+                            "}catch(err){console.error('snpd diary save failed',err);}})()}";
+                        body.replace(cp, constructed.size(), rep);
+                        logger::info("SkyrimNetDashboard: PatchBundle: diary download button patched (el={} url={} fname={})",
+                            elVar, urlVar, fnameVar);
+                    } else {
+                        logger::warn("SkyrimNetDashboard: PatchBundle: diary download button reconstructed needle not found");
+                    }
+                } else {
+                    logger::warn("SkyrimNetDashboard: PatchBundle: diary download button vars incomplete (el={} url={} fname={})",
+                        elVar, urlVar, fnameVar);
+                }
+            } else {
+                logger::warn("SkyrimNetDashboard: PatchBundle: diary download .download= not found near anchor");
+            }
         } else {
-            logger::warn("SkyrimNetDashboard: PatchBundle: diary download button needle not found");
+            logger::warn("SkyrimNetDashboard: PatchBundle: diary download button anchor not found");
         }
     }
 
     // CodeMirror updateListener fires onChange(text) every keystroke via setTimeout(fn,0).
     // Patch: use a module-scoped timer variable (_snpdCmTmr) for a 600ms debounce.
-    static const std::string needle =
-        "e.docChanged){const t=e.state.doc.toString();setTimeout(()=>b(t),0)}";
-    // Move doc.toString() inside the timer so it only fires once per typing burst,
-    // not on every keystroke — avoids allocating a full doc string copy each keypress
-    // and removes the GC pressure that causes the periodic "every so often" stutter.
-    static const std::string replacement =
-        "e.docChanged){const _ss=e.state;"
-        // Also stash the live EditorView on a known global so InjectPatches drag
-        // handler can reach it without traversing CM6 internals.
-        "self._snpdView=e.view;"
-        "clearTimeout(self._snpdCmTmr);self._snpdCmTmr=setTimeout(()=>b(_ss.doc.toString()),600)}";
+    // Variable names extracted at runtime via ".state.doc.toString()" anchor.
+    {
+        static const std::string cmAnchor = ".state.doc.toString()";
+        auto ap = body.find(cmAnchor);
+        if (ap != std::string::npos) {
+            std::string updateVar = IdentBwd(body, ap);
+            std::string dcPrefix = updateVar + ".docChanged){const ";
+            auto dcPos = body.rfind(dcPrefix, ap);
+            std::string textVar = (dcPos != std::string::npos)
+                ? IdentFwd(body, dcPos + dcPrefix.size()) : "";
+            auto stPos = body.find("setTimeout(()=>", ap);
+            std::string cbVar = (stPos != std::string::npos)
+                ? IdentFwd(body, stPos + 15) : "";
+
+            if (!updateVar.empty() && !textVar.empty() && !cbVar.empty()) {
+                // Reconstruct the exact needle from extracted vars.
+                std::string constructed =
+                    updateVar + ".docChanged){const " + textVar + "=" +
+                    updateVar + ".state.doc.toString();setTimeout(()=>" +
+                    cbVar + "(" + textVar + "),0)}";
+                auto cp = body.find(constructed);
+                if (cp != std::string::npos) {
+                    std::string rep =
+                        updateVar + ".docChanged){const _ss=" + updateVar + ".state;"
+                        "self._snpdView=" + updateVar + ".view;"
+                        "clearTimeout(self._snpdCmTmr);self._snpdCmTmr=setTimeout(()=>" +
+                        cbVar + "(_ss.doc.toString()),600)}";
+                    body.replace(cp, constructed.size(), rep);
+                    logger::info("SkyrimNetDashboard: PatchBundle: CodeMirror debounce applied (update={} cb={})",
+                        updateVar, cbVar);
+                } else {
+                    logger::warn("SkyrimNetDashboard: PatchBundle: CodeMirror reconstructed needle not found");
+                }
+            } else {
+                logger::warn("SkyrimNetDashboard: PatchBundle: CodeMirror vars incomplete (update={} text={} cb={})",
+                    updateVar, textVar, cbVar);
+            }
+        } else {
+            logger::warn("SkyrimNetDashboard: PatchBundle: CodeMirror anchor not found");
+        }
+    }
     // Patch 2: Replace synchronous prompt() call in "Add new prompt" handler with
     // an async modal dialog, since Ultralight doesn't support window.prompt().
     // The original: S=e=>{const t=prompt("Enter prompt name...");if(t){...}k()}
@@ -432,63 +546,37 @@ static std::string PatchBundle(std::string body)
             logger::info("SkyrimNetDashboard: PatchBundle: prompt() dialog patch applied");
         }
     }
-    auto pos = body.find(needle);
-    if (pos != std::string::npos) {
-        body.replace(pos, needle.size(), replacement);
-        logger::info("SkyrimNetDashboard: PatchBundle: CodeMirror debounce applied");
-    }
 
-    // ── Test TTS audio: bypass blob URL → new Audio path (3 minified variants) ────────
+    // ── Test TTS audio: bypass blob URL → new Audio path ──────────────────────
     // The test page plays a TTS sample with:
     //   fetch(ttsEndpoint) → t.blob() → URL.createObjectURL(blob) → new Audio(blobUrl) → play()
-    // Our C++ proxy intercepts the test-TTS endpoints, fetches the audio from SkyrimNet,
-    // plays it via waveOut, and returns {"status":"playing"}.  The JS never receives
-    // binary audio bytes — it just gets a small JSON response.
-    // So we patch the blob/Audio chain to skip all of that and just wait for the
-    // snpd:audioended event that C++ fires when waveOut finishes.
-    // Three variants exist in the bundle (same pattern, different minified variable names).
+    // Our C++ proxy plays audio via waveOut and returns {"status":"playing"}.
+    // The JS never receives binary audio — just a small JSON response. So we patch
+    // the blob/Audio chain to skip all of that and wait for the snpd:testttsended
+    // event that C++ fires when waveOut finishes.
+    // A single regex covers all minified variants — captures the variable names
+    // for the audio element and setPlaying/setLoading state setters.
+    // Regex runs on the full body; proven safe alone on MSVC (Phase 4 validated).
     {
-        struct TtsPatch { std::string needle; std::string replacement; };
-        static const TtsPatch kTtsPatches[] = {
-            // Variant 1: state vars ft/wt/vt, audio alias 'a'
-            {
-                "const s=await t.blob(),r=URL.createObjectURL(s),a=new Audio(r);"
-                "wt(!0),a.onended=()=>{ft(!1),setTimeout(()=>wt(!1),2e3),URL.revokeObjectURL(r)},"
-                "a.onerror=e=>{vt(\"Failed to play TTS audio\"),ft(!1),wt(!1),URL.revokeObjectURL(r)},"
-                "await a.play()",
-                // C++ plays audio via waveOut and fires snpd:testttsended when done.
-                // Show playing state now; clear it when the event arrives.
-                "wt(!0),document.addEventListener('snpd:testttsended',function _snpdE1(){ft(!1),wt(!1),document.removeEventListener('snpd:testttsended',_snpdE1)})"
-            },
-            // Variant 2: state vars b/u/p, audio alias 'a'
-            {
-                "const s=await t.blob(),r=URL.createObjectURL(s),a=new Audio(r);"
-                "b(!0),a.onended=()=>{u(!1),setTimeout(()=>b(!1),2e3),URL.revokeObjectURL(r)},"
-                "a.onerror=e=>{p(\"Failed to play TTS audio\"),u(!1),b(!1),URL.revokeObjectURL(r)},"
-                "await a.play()",
-                "b(!0),document.addEventListener('snpd:testttsended',function _snpdE2(){u(!1),b(!1),document.removeEventListener('snpd:testttsended',_snpdE2)})"
-            },
-            // Variant 3: state vars m/a/n, audio alias 'l'
-            {
-                "const s=await t.blob(),r=URL.createObjectURL(s),l=new Audio(r);"
-                "m(!0),l.onended=()=>{a(!1),setTimeout(()=>m(!1),2e3),URL.revokeObjectURL(r)},"
-                "l.onerror=e=>{n(\"Failed to play TTS audio\"),a(!1),m(!1),URL.revokeObjectURL(r)},"
-                "await l.play()",
-                "m(!0),document.addEventListener('snpd:testttsended',function _snpdE3(){a(!1),m(!1),document.removeEventListener('snpd:testttsended',_snpdE3)})"
-            },
-        };
+        static const std::regex kTtsRe(
+            R"(const s=await t\.blob\(\),r=URL\.createObjectURL\(s\),(\w+)=new Audio\(r\);)"
+            R"((\w+)\(!0\),\1\.onended=\(\)=>\{(\w+)\(!1\),setTimeout\(\(\)=>\2\(!1\),2e3\),)"
+            R"(URL\.revokeObjectURL\(r\)\},\1\.onerror=\w+=>\{(\w+)\([^)]+\),\3\(!1\),\2\(!1\),)"
+            R"(URL\.revokeObjectURL\(r\)\},await \1\.play\(\))",
+            std::regex::ECMAScript | std::regex::optimize);
         int patchCount = 0;
-        for (auto& p : kTtsPatches) {
-            auto ppos = body.find(p.needle);
-            if (ppos != std::string::npos) {
-                body.replace(ppos, p.needle.size(), p.replacement);
-                ++patchCount;
-            }
+        std::smatch m;
+        while (std::regex_search(body, m, kTtsRe)) {
+            std::string rep = m.str(2) + "(!0),document.addEventListener('snpd:testttsended',"
+                "function _snpdE(){" + m.str(3) + "(!1)," + m.str(2) +
+                "(!1),document.removeEventListener('snpd:testttsended',_snpdE)})";
+            body.replace(static_cast<std::size_t>(m.position()), static_cast<std::size_t>(m.length()), rep);
+            ++patchCount;
         }
         if (patchCount > 0)
-            logger::info("SkyrimNetDashboard: PatchBundle: test TTS audio patched ({} variants)", patchCount);
+            logger::info("SkyrimNetDashboard: PatchBundle: test TTS audio patched ({} via regex)", patchCount);
         else
-            logger::warn("SkyrimNetDashboard: PatchBundle: test TTS audio needle not found");
+            logger::warn("SkyrimNetDashboard: PatchBundle: test TTS audio regex found no matches");
     }
 
     return body;
@@ -1313,14 +1401,14 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     SaveSettings();
                 }
                 // Re-register hotkey if it changed (KeyHandler has its own lock; no s_cfgMtx needed)
-                if (newHotKey != static_cast<int>(s_toggleKey) && newHotKey > 0) {
+                if (newHotKey != static_cast<int>(s_toggleKey.load()) && newHotKey > 0) {
                     auto* kh = KeyHandler::GetSingleton();
                     if (s_toggleHandle != INVALID_REGISTRATION_HANDLE)
                         kh->Unregister(s_toggleHandle);
-                    s_toggleKey    = static_cast<uint32_t>(newHotKey);
-                    s_toggleHandle = kh->Register(s_toggleKey, KeyEventType::KEY_DOWN, OnToggle);
+                    s_toggleKey.store(static_cast<uint32_t>(newHotKey));
+                    s_toggleHandle = kh->Register(s_toggleKey.load(), KeyEventType::KEY_DOWN, OnToggle);
                     logger::info("SkyrimNetDashboard: hotkey changed to {} (0x{:02X})",
-                        DxKeyName(s_toggleKey), s_toggleKey);
+                        DxKeyName(s_toggleKey.load()), s_toggleKey.load());
                 }
                 body        = "{\"saved\":true}";
                 contentType = "application/json";
@@ -1483,8 +1571,19 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     upstreamStatus = resSc;
                     if (contentType.find("text/html") != std::string::npos && !body.empty())
                         body = InjectPatches(std::move(body));
-                    else if (contentType.find("javascript") != std::string::npos && !body.empty())
+                    else if (contentType.find("javascript") != std::string::npos && !body.empty()) {
                         body = PatchBundle(std::move(body));
+                        // One-shot dump of each patched JS bundle for offline verification.
+                        static std::atomic<int> s_bundleDumpIdx{0};
+                        if (s_bundleDumpIdx.load() < 10) {
+                            auto idx = s_bundleDumpIdx.fetch_add(1);
+                            auto dp = std::filesystem::temp_directory_path() /
+                                ("snpd_patched_" + std::to_string(idx) + ".js");
+                            std::ofstream(dp, std::ios::binary) << body;
+                            logger::info("SkyrimNetDashboard: dumped patched JS #{} ({} bytes) to {}",
+                                idx, body.size(), dp.string());
+                        }
+                    }
                     else if (contentType.find("text/css") != std::string::npos && !body.empty())
                         body = PatchCSS(std::move(body));
                     // For API calls (non-GET): if the body is empty and upstream
