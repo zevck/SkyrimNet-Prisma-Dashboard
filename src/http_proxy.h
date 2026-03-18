@@ -772,12 +772,28 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
         }
     }
 
-    std::thread([srv, shellHtml, proxyHost, proxyPort]() {
+    // Generate a per-session auth token so only our Ultralight browser
+    // (which receives the token via Set-Cookie) can hit sensitive endpoints.
+    std::string sessionToken;
+    {
+        std::random_device rd;
+        std::mt19937_64    gen(rd());
+        std::uniform_int_distribution<uint64_t> dist;
+        uint64_t a = dist(gen), b = dist(gen);
+        char buf[33];
+        snprintf(buf, sizeof(buf), "%016llx%016llx",
+                 static_cast<unsigned long long>(a),
+                 static_cast<unsigned long long>(b));
+        sessionToken = buf;
+    }
+    logger::info("SkyrimNetDashboard: session token generated");
+
+    std::thread([srv, shellHtml, proxyHost, proxyPort, sessionToken]() {
 
         // Per-connection handler — runs on its own thread so all requests are
         // served in parallel.  This is critical for React apps which fire
         // 10-20 simultaneous asset/API requests on every page transition.
-        auto handleClient = [&shellHtml, &proxyHost, proxyPort](SOCKET client) {
+        auto handleClient = [&shellHtml, &proxyHost, proxyPort, &sessionToken](SOCKET client) {
             // Read the full request (headers + possible body)
             std::string rawReq;
             {
@@ -809,8 +825,8 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 }
             }
 
-            // Parse method, path, request content-type, and body
-            std::string method = "GET", path = "/", reqCT, reqBody;
+            // Parse method, path, request content-type, cookie, and body
+            std::string method = "GET", path = "/", reqCT, reqCookie, reqBody;
             {
                 auto lineEnd = rawReq.find("\r\n");
                 std::string requestLine = (lineEnd != std::string::npos)
@@ -835,18 +851,55 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                         while (!reqCT.empty() && reqCT.front() == ' ') reqCT.erase(reqCT.begin());
                     }
                     reqBody = rawReq.substr(headerEnd + 4);
+
+                    // Extract Cookie header for session-token auth
+                    auto ckPos = hdrlower.find("\r\ncookie:");
+                    if (ckPos != std::string::npos) {
+                        ckPos += 2; // skip past \r\n
+                        auto eol2 = hdrs.find("\r\n", ckPos);
+                        reqCookie = hdrs.substr(ckPos + 7,
+                            eol2 != std::string::npos ? eol2 - ckPos - 7 : std::string::npos);
+                        while (!reqCookie.empty() && reqCookie.front() == ' ')
+                            reqCookie.erase(reqCookie.begin());
+                    }
                 }
             }
 
             // Diagnostic: log every incoming request so we can see what the browser sends.
             logger::info("SkyrimNetDashboard: >> {} {}", method, path);
 
+            // Session-token gate: sensitive endpoints require the auth cookie.
+            // The cookie is set automatically when /shell is first loaded.
+            bool needsToken = path.substr(0, 10) == "/save-file"
+                           || path.substr(0, 10) == "/read-file"
+                           || path.substr(0, 12) == "/save-dialog"
+                           || path.substr(0, 12) == "/open-dialog";
+            if (needsToken) {
+                std::string needle = "__snpdt=" + sessionToken;
+                if (reqCookie.find(needle) == std::string::npos) {
+                    logger::warn("SkyrimNetDashboard: rejected {} (missing session token)", path);
+                    std::string resp403 =
+                        "HTTP/1.1 403 Forbidden\r\n"
+                        "Content-Type: text/plain\r\n"
+                        "Content-Length: 9\r\n"
+                        "Connection: close\r\n"
+                        "\r\nForbidden";
+                    send(client, resp403.c_str(), static_cast<int>(resp403.size()), 0);
+                    closesocket(client);
+                    return;
+                }
+            }
+
             std::string body;
             std::string contentType = "text/html; charset=utf-8";
+            std::string extraHeaders; // additional headers for this response
             int upstreamStatus = 200;
 
             if (path == "/shell" || path.empty()) {
                 body = shellHtml;
+                // Set session-token cookie so all subsequent requests are authenticated
+                extraHeaders = "Set-Cookie: __snpdt=" + sessionToken
+                             + "; SameSite=Strict; Path=/; HttpOnly\r\n";
             } else if (path == "/audio") {
                 // Audio control endpoint — called by the injected JS bridge via fetch POST.
                 // Fire-and-forget: response is ignored by the browser.
@@ -962,6 +1015,16 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                         if (pathPos != std::string::npos) {
                             // Full path supplied by the save dialog
                             savePath = UrlDecode(query.substr(pathPos + 5));
+                            // Security: only absolute Windows paths; no ".." traversal
+                            bool ok = savePath.size() >= 3
+                                && isalpha(static_cast<unsigned char>(savePath[0]))
+                                && savePath[1] == ':'
+                                && (savePath[2] == '\\' || savePath[2] == '/')
+                                && savePath.find("..") == std::string::npos;
+                            if (!ok) {
+                                logger::warn("SkyrimNetDashboard: /save-file rejected path '{}'", savePath);
+                                savePath.clear();
+                            }
                         } else if (namePos != std::string::npos) {
                             std::string fname = UrlDecode(query.substr(namePos + 5));
                             // Strip path components and dangerous chars from bare filename
@@ -1130,6 +1193,21 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     && filePath[1] == ':'
                     && (filePath[2] == '\\' || filePath[2] == '/')
                     && filePath.find("..") == std::string::npos;
+                // Canonicalize to defeat encoded traversal or junction tricks
+                if (pathOk) {
+                    std::error_code ec;
+                    auto canon = std::filesystem::weakly_canonical(filePath, ec);
+                    if (!ec) {
+                        filePath = canon.string();
+                        pathOk = filePath.size() >= 3
+                            && isalpha(static_cast<unsigned char>(filePath[0]))
+                            && filePath[1] == ':'
+                            && (filePath[2] == '\\' || filePath[2] == '/')
+                            && filePath.find("..") == std::string::npos;
+                    } else {
+                        pathOk = false;
+                    }
+                }
                 if (!pathOk) {
                     body           = "{\"error\":\"invalid path\"}";
                     contentType    = "application/json";
@@ -1453,6 +1531,7 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 "Content-Type: " + contentType + "\r\n"
                 "Content-Length: " + std::to_string(body.size()) + "\r\n"
                 "Cache-Control: " + cacheControl + "\r\n"
+                + extraHeaders +
                 "Connection: close\r\n"
                 "\r\n" + body;
             send(client, resp.c_str(), static_cast<int>(resp.size()), 0);
