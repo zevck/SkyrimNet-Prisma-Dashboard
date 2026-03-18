@@ -44,7 +44,7 @@ The dashboard connects to the SkyrimNet server running on your PC. By default it
 
 If the panel opens but shows a blank page or an error:
 
-Check that the URL in `SKSE/Plugins/SkyrimNetPrismaDashboard.ini` matches where SkyrimNet is actually running.
+Update `SKSE/Plugins/SkyrimNetPrismaDashboard.ini` to match where SkyrimNet is actually running.
    - On most setups, `http://localhost:8080/` works without any changes.
 
 ---
@@ -72,5 +72,5 @@ PauseGame=0
 ```
 
 ## Credits
-- SkyrimNet
-- PrismaUI
+- [SkyrimNet](https://github.com/MinLL/SkyrimNet-GamePlugin)
+- [PrismaUI](https://www.nexusmods.com/skyrimspecialedition/mods/148718)
