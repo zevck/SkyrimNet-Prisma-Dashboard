@@ -10,8 +10,8 @@ Brings the SkyrimNet web dashboard directly into Skyrim, no alt-tabbing required
 
 ## Requirements
 
-- **SkyrimNet** — the AI companion mod this dashboard controls
-- **PrismaUI** — the in-game browser overlay framework this mod relies on
+- **SkyrimNet** - the AI companion mod this dashboard controls
+- **PrismaUI** - the in-game browser overlay framework this mod relies on
 
 ---
 
@@ -19,7 +19,7 @@ Brings the SkyrimNet web dashboard directly into Skyrim, no alt-tabbing required
 
 Press **F4** while in-game to open or close the dashboard.
 
-The panel appears as an overlay — you can resize it, drag it around, zoom, or go fullscreen. When you're done, press F4 again (or click the X on the panel) to close it. Keybind can be configured.
+The panel appears as an overlay. You can resize it, drag it around, zoom, or go fullscreen. When you're done, press F4 again (or click the X on the panel) to close it. Keybind can be configured.
 
 ---
 
