@@ -1427,6 +1427,14 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
             } else if (path == "/settings-get") {
                 { std::lock_guard<std::mutex> lk(s_cfgMtx); body = SettingsToJson(); }
                 contentType = "application/json";
+            } else if (path == "/snpd-toggle-keepbg") {
+                {
+                    std::lock_guard<std::mutex> lk(s_cfgMtx);
+                    s_cfg.keepBg = !s_cfg.keepBg;
+                    SaveSettings();
+                    body = std::string("{\"keepBg\":") + (s_cfg.keepBg ? "true" : "false") + "}";
+                }
+                contentType = "application/json";
             } else if (path == "/settings-save") {
                 // Minimal JSON field extractor — no full parser needed
                 auto extractStr = [&](const std::string& key) -> std::string {

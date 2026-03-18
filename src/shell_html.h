@@ -23,6 +23,8 @@ html,body{width:100%;height:100%;background:transparent;overflow:hidden}
 .btn{display:flex;align-items:center;gap:4px;padding:4px 12px;background:#374151;border:none;border-radius:4px;color:#fff;font-size:12px;font-family:Consolas,"Courier New",monospace;cursor:pointer;pointer-events:auto}
 .btn.icon{padding:4px 7px}
 .btn:hover{background:#4b5563}
+#KBB.active{background:#b45309}#KBB.active:hover{background:#d97706}
+#KBB:not(.active){opacity:0.55}#KBB:not(.active):hover{opacity:1}
 .btn:disabled{opacity:.35;cursor:default}
 #XB{display:flex;align-items:center;padding:4px 8px;background:#dc2626;border:none;border-radius:4px;color:#fff;cursor:pointer}
 #XB:hover{background:#ef4444}
@@ -69,6 +71,7 @@ iframe{width:100%;height:100%;border:none;display:block}
     </div>
     <div id="R">
       <button class="btn" id="ZL" title="Reset zoom" style="font-size:11px;min-width:38px;">100%</button>
+      <button class="btn icon" id="KBB" title="Keep Background (off)"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></button>
       <button class="btn icon" id="SB" title="Settings"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
       <button class="btn" id="FB"></button>
       <button id="XB"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
@@ -90,13 +93,15 @@ iframe{width:100%;height:100%;border:none;display:block}
         html += escQ(s_cfg.winW)  + "',h:'";
         html += escQ(s_cfg.winH)  + "',zoom:'";
         html += escQ(s_cfg.winZoom);
-        html += std::string("',fs:'") + (s_cfg.winFs ? "true" : "false") + "'};";
+        html += std::string("',fs:'") + (s_cfg.winFs ? "true" : "false") + "',keepBg:" + (s_cfg.keepBg ? "true" : "false") + "};";
+
         html += "if(sl.x)localStorage.setItem('snpd-x',sl.x);"
                 "if(sl.y)localStorage.setItem('snpd-y',sl.y);"
                 "if(sl.w)localStorage.setItem('snpd-w',sl.w);"
                 "if(sl.h)localStorage.setItem('snpd-h',sl.h);"
                 "if(sl.zoom)localStorage.setItem('snpd-zoom',sl.zoom);"
                 "localStorage.setItem('snpd-fs',sl.fs);"
+                "window.snpdInitKeepBg=sl.keepBg;"
                 "})();</script>";
     }
     html +=
@@ -113,6 +118,7 @@ iframe{width:100%;height:100%;border:none;display:block}
       ZL=document.getElementById('ZL'),
       BB=document.getElementById('BB'),
       FWB=document.getElementById('FWB'),
+      KBB=document.getElementById('KBB'),
       OL=document.getElementById('OL'),
       FR=document.getElementById('snpd-frame');
   var fs=localStorage.getItem('snpd-fs')==='true';
@@ -298,6 +304,17 @@ iframe{width:100%;height:100%;border:none;display:block}
     ov.addEventListener('mousedown',function(e){e.stopPropagation();});
     return ov;
   }
+  var keepBg=!!(window.snpdInitKeepBg);
+  function applyKbState(){KBB.title='Keep Background ('+(keepBg?'on':'off')+')';KBB.classList.toggle('active',keepBg);}
+  applyKbState();
+  KBB.addEventListener('mousedown',function(e){e.stopPropagation();});
+  KBB.addEventListener('click',function(e){
+    e.stopPropagation();
+    fetch('/snpd-toggle-keepbg',{method:'POST'})
+      .then(function(r){return r.json();})
+      .then(function(j){keepBg=j.keepBg;applyKbState();})
+      .catch(function(){});
+  });
   SB.addEventListener('mousedown',function(e){e.stopPropagation();});
   SB.addEventListener('click',function(e){
     e.stopPropagation();

@@ -264,8 +264,7 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     // 5. Create a view that loads the shell page (chrome + iframe pointing at SkyrimNet)
     s_View = s_PrismaUI->CreateView(shellUrl.c_str(), OnDomReady);
     s_PrismaUI->SetScrollingPixelSize(s_View, 120);
-    if (!s_cfg.keepBg)
-        s_PrismaUI->Hide(s_View); // Start hidden unless KeepBackground=1
+    s_PrismaUI->Hide(s_View); // Always start hidden; keepBg only affects close-to-background behavior
 
     StartClipboardMonitor(); // C++ Ctrl+C/V polling — bypasses Ultralight event quirks
 
