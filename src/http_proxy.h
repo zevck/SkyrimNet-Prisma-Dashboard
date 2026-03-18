@@ -255,6 +255,86 @@ static std::string PatchCSS(std::string body)
             logger::info("SkyrimNetDashboard: PatchCSS: stripped {} backdrop-filter declarations", count);
     }
 
+    // Ultralight renders CSS transitions in software — every transition-property
+    // frame is a full repaint.  Tailwind compiles hundreds of transition-*
+    // utilities; strip them to avoid continuous repainting on hover/focus/etc.
+    {
+        int count = 0;
+        std::string::size_type pos = 0;
+        // Covers transition:, transition-property:, transition-duration:, etc.
+        static const std::string tp = "transition";
+        while ((pos = body.find(tp, pos)) != std::string::npos) {
+            // Must be at start or after { or ; (i.e. a CSS property, not a substring)
+            if (pos > 0) {
+                char prev = body[pos - 1];
+                if (prev != '{' && prev != ';' && prev != ' ' && prev != '\n') {
+                    pos += tp.size();
+                    continue;
+                }
+            }
+            // Check it looks like a declaration (followed by - or :)
+            auto after = pos + tp.size();
+            if (after < body.size() && body[after] != ':' && body[after] != '-') {
+                pos = after;
+                continue;
+            }
+            auto semi = body.find(';', pos);
+            if (semi == std::string::npos) break;
+            std::fill(body.begin() + pos, body.begin() + semi + 1, ' ');
+            pos = semi + 1;
+            ++count;
+        }
+        if (count)
+            logger::info("SkyrimNetDashboard: PatchCSS: stripped {} transition declarations", count);
+    }
+
+    // CSS animations (keyframes) also cause continuous repaints in Ultralight.
+    // Strip animation: and animation-* declarations.
+    {
+        int count = 0;
+        std::string::size_type pos = 0;
+        static const std::string ap = "animation";
+        while ((pos = body.find(ap, pos)) != std::string::npos) {
+            if (pos > 0) {
+                char prev = body[pos - 1];
+                if (prev != '{' && prev != ';' && prev != ' ' && prev != '\n') {
+                    pos += ap.size();
+                    continue;
+                }
+            }
+            auto after = pos + ap.size();
+            if (after < body.size() && body[after] != ':' && body[after] != '-') {
+                pos = after;
+                continue;
+            }
+            auto semi = body.find(';', pos);
+            if (semi == std::string::npos) break;
+            std::fill(body.begin() + pos, body.begin() + semi + 1, ' ');
+            pos = semi + 1;
+            ++count;
+        }
+        if (count)
+            logger::info("SkyrimNetDashboard: PatchCSS: stripped {} animation declarations", count);
+    }
+
+    // box-shadow with blur radii cause expensive software rasterization each frame.
+    // Strip all box-shadow declarations — the app's visual design doesn't need them
+    // in Ultralight (elements already have borders/backgrounds for contrast).
+    {
+        int count = 0;
+        std::string::size_type pos = 0;
+        static const std::string bs = "box-shadow:";
+        while ((pos = body.find(bs, pos)) != std::string::npos) {
+            auto semi = body.find(';', pos);
+            if (semi == std::string::npos) break;
+            std::fill(body.begin() + pos, body.begin() + semi + 1, ' ');
+            pos = semi + 1;
+            ++count;
+        }
+        if (count)
+            logger::info("SkyrimNetDashboard: PatchCSS: stripped {} box-shadow declarations", count);
+    }
+
     return body;
 }
 
@@ -1403,6 +1483,38 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     s_toggleHandle = kh->Register(s_toggleKey.load(), KeyEventType::KEY_DOWN, OnToggle);
                     logger::info("SkyrimNetDashboard: hotkey changed to {} (0x{:02X})",
                         DxKeyName(s_toggleKey.load()), s_toggleKey.load());
+                }
+                body        = "{\"saved\":true}";
+                contentType = "application/json";
+            } else if (path == "/snpd-save-layout") {
+                // Persists window position/size/zoom/fullscreen to the INI so they
+                // survive across game sessions.  Values come from JS localStorage.
+                auto extractLayoutStr = [&](const std::string& key) -> std::string {
+                    auto needle = '"' + key + "\":\"";
+                    auto pos = reqBody.find(needle);
+                    if (pos == std::string::npos) return "";
+                    pos += needle.size();
+                    auto end = reqBody.find('"', pos);
+                    if (end == std::string::npos) return "";
+                    auto val = reqBody.substr(pos, end - pos);
+                    // Limit length — CSS values like "1200px" / zoom "1.2" are always short
+                    if (val.size() > 32) val.clear();
+                    return val;
+                };
+                {
+                    std::lock_guard<std::mutex> lk(s_cfgMtx);
+                    s_cfg.winX    = extractLayoutStr("x");
+                    s_cfg.winY    = extractLayoutStr("y");
+                    s_cfg.winW    = extractLayoutStr("w");
+                    s_cfg.winH    = extractLayoutStr("h");
+                    s_cfg.winZoom = extractLayoutStr("zoom");
+                    if (!s_cfg.winZoom.empty()) {
+                        float z = static_cast<float>(std::atof(s_cfg.winZoom.c_str()));
+                        if (z < 0.20f || z > 3.0f) s_cfg.winZoom = "";
+                    }
+                    auto fsStr = extractLayoutStr("fs");
+                    s_cfg.winFs = (fsStr == "true");
+                    SaveSettings();
                 }
                 body        = "{\"saved\":true}";
                 contentType = "application/json";

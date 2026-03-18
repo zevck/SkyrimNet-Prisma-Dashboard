@@ -17,6 +17,13 @@ struct DashboardSettings {
     bool        keepBg       = false; // keep page alive when closed
     bool        defaultHome  = false; // always open base URL instead of lastPage
     bool        pauseGame    = false; // pause while focused
+    // Window layout (persisted across game sessions)
+    std::string winX     = "";  // CSS left value, e.g. "423px"
+    std::string winY     = "";
+    std::string winW     = "";
+    std::string winH     = "";
+    std::string winZoom  = "";  // e.g. "1.2"; empty = not yet saved
+    bool        winFs    = false;
 };
 
 static DashboardSettings s_cfg;
@@ -136,6 +143,16 @@ static void LoadSettings()
     s_cfg.keepBg      = readInt("KeepBackground", 0) != 0;
     s_cfg.defaultHome = readInt("DefaultHome",    0) != 0;
     s_cfg.pauseGame   = readInt("PauseGame",      0) != 0;
+    s_cfg.winX        = readStr("WinX",    "");
+    s_cfg.winY        = readStr("WinY",    "");
+    s_cfg.winW        = readStr("WinW",    "");
+    s_cfg.winH        = readStr("WinH",    "");
+    s_cfg.winZoom     = readStr("WinZoom", "");
+    if (!s_cfg.winZoom.empty()) {
+        float z = static_cast<float>(std::atof(s_cfg.winZoom.c_str()));
+        if (z < 0.20f || z > 3.0f) s_cfg.winZoom = "";
+    }
+    s_cfg.winFs       = readInt("WinFs",   0) != 0;
 
     logger::info("SkyrimNetDashboard: INI loaded from '{}'", s_iniPath);
     logger::info("  URL={} HotKey=0x{:02X} keepBg={} defaultHome={} pauseGame={}",
@@ -158,6 +175,12 @@ static void SaveSettings()
     wi("KeepBackground",s_cfg.keepBg      ? 1 : 0);
     wi("DefaultHome",   s_cfg.defaultHome  ? 1 : 0);
     wi("PauseGame",     s_cfg.pauseGame    ? 1 : 0);
+    ws("WinX",          s_cfg.winX);
+    ws("WinY",          s_cfg.winY);
+    ws("WinW",          s_cfg.winW);
+    ws("WinH",          s_cfg.winH);
+    ws("WinZoom",       s_cfg.winZoom);
+    wi("WinFs",         s_cfg.winFs ? 1 : 0);
     logger::info("SkyrimNetDashboard: settings saved to INI");
 }
 

@@ -160,9 +160,9 @@ static void StartClipboardMonitor()
     std::thread([]() {
         bool prevC = false, prevV = false, prevX = false;
         for (;;) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
             if (!s_PrismaUI || !s_View) { prevC = prevV = prevX = false; continue; }
-            if (!s_PrismaUI->HasFocus(s_View)) { prevC = prevV = prevX = false; continue; }
+            if (s_PrismaUI->IsHidden(s_View) || !s_PrismaUI->HasFocus(s_View)) { prevC = prevV = prevX = false; continue; }
             bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             bool curC  = (GetAsyncKeyState('C') & 0x8000) != 0;
             bool curV  = (GetAsyncKeyState('V') & 0x8000) != 0;
