@@ -48,6 +48,9 @@ opacity:1!important;}
 /* ── Native caret while CM6 is bypassed ──────────────────────────── */
 .cm-editing .cm-cursorLayer{display:none!important;}
 .cm-editing .cm-content{caret-color:#e5e7eb!important;}
+/* Hide CM6 selection highlights while bypassed — native selection
+   handles visual feedback; stale CM6 divs cause ghost highlights. */
+.cm-editing .cm-selectionLayer{display:none!important;}
 </style>
 <script>
 // CM6 full bypass: block all 5 CM6 input paths while editing.
@@ -124,6 +127,13 @@ _keyActive=true;
 if(k==='Enter'){
 document.execCommand('insertParagraph',false,null);
 e.preventDefault();}
+// Arrow keys: force Ultralight to repaint the native caret.
+// Without a DOM mutation the software renderer may skip painting it.
+if(k==='ArrowLeft'||k==='ArrowRight'||k==='ArrowUp'||k==='ArrowDown'
+||k==='Home'||k==='End'){
+var ct=editor.querySelector('.cm-content');
+if(ct){ct.style.outline='0px solid transparent';
+requestAnimationFrame(function(){ct.style.outline='';});}}
 e.stopImmediatePropagation();
 },true);
 
