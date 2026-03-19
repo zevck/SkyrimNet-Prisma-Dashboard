@@ -37,27 +37,160 @@ border:1px solid #4b5563!important;border-radius:4px!important;
 padding:2px 4px!important;}
 select option{
 color:#000000!important;}
+
+/* ── Repaint cost reduction ─────────────────────────────────────────
+   Kill CM6 cursor blink animation — continuous CSS animation forces
+   Ultralight to repaint the cursor layer every frame even when idle. */
+.cm-cursor,.cm-cursorLayer{
+animation:none!important;-webkit-animation:none!important;
+opacity:1!important;}
+
+/* ── Native caret while CM6 is bypassed ──────────────────────────── */
+.cm-editing .cm-cursorLayer{display:none!important;}
+.cm-editing .cm-content{caret-color:#e5e7eb!important;}
 </style>
 <script>
-// ── Key-repeat throttle for CM6 editors ──────────────────────────────
-// When holding Backspace/Delete Ultralight fires keydown at the OS
-// key-repeat rate (~30/s). Each event triggers a full CM6 transaction
-// + DOM update, creating noticeable lag. Throttle repeats to ≤15/s
-// (66 ms gap) — still fast enough to feel continuous.
+// CM6 full bypass: block all 5 CM6 input paths while editing.
+// Native contenteditable handles chars/backspace/delete.
+// Enter is handled via execCommand. Sync to CM6 on mouse click
+// (so selection maps correctly) and on focusout.
 (function(){
-var _krT=0;
+var _OrigMO=window.MutationObserver;
+var _active=null;
+var _syncing=false;
+var _keyActive=false;
+
+function _inCmEditor(el){
+var p=el;
+while(p){
+if(p.nodeType===1&&p.classList&&p.classList.contains('cm-editor'))return p;
+p=p.parentElement;}
+return null;}
+
+function _getView(editor){
+var ct=editor.querySelector('.cm-content');
+if(!ct)return null;
+var cv=ct.cmView;
+return (cv&&cv.view&&cv.view.dispatch)?cv.view:self._snpdView;}
+
+function _readDOM(editor){
+var ct=editor.querySelector('.cm-content');
+if(!ct)return '';
+var nodes=ct.childNodes;
+if(!nodes.length)return '';
+var parts=[];
+for(var i=0;i<nodes.length;i++){
+var nd=nodes[i];
+if(nd.nodeType===1)parts.push(nd.textContent);
+else if(nd.nodeType===3&&nd.textContent){
+if(parts.length>0)parts[parts.length-1]+=nd.textContent;
+else parts.push(nd.textContent);}}
+return parts.join(String.fromCharCode(10)).replace(/\u00A0/g,' ');}
+
+function _syncToCM6(editor){
+var v=_getView(editor);
+if(!v)return;
+var domText=_readDOM(editor);
+var cmText=v.state.doc.toString();
+if(domText===cmText)return;
+_syncing=true;
+v.dispatch({changes:{from:0,to:cmText.length,insert:domText}});
+setTimeout(function(){_syncing=false;},0);}
+
+function _activate(editor){
+if(_active===editor)return;
+if(_active)_deactivate();
+_active=editor;
+editor.classList.add('cm-editing');}
+
+function _deactivate(){
+if(!_active)return;
+var editor=_active;
+_active=null;
+_syncToCM6(editor);
+editor.classList.remove('cm-editing');}
+
+// Block keydown — native contenteditable handles chars/backspace/delete.
+// Enter: execCommand since native may not handle it in CM6's DOM.
 document.addEventListener('keydown',function(e){
-if(!e.repeat){_krT=0;return;}
-if(e.key!=='Backspace'&&e.key!=='Delete')return;
-// Only throttle inside a CM6 editor so normal inputs aren't affected
-var p=e.target;
-while(p){if(p.className&&typeof p.className==='string'
-&&p.className.indexOf('cm-content')>=0)break;p=p.parentElement;}
-if(!p)return;
-var n=Date.now();
-if(n-_krT<66){e.stopImmediatePropagation();e.preventDefault();return;}
-_krT=n;
+if(!e.isTrusted)return;
+if(e.ctrlKey||e.metaKey)return;
+var k=e.key;
+if(k==='Escape')return;
+var editor=_inCmEditor(e.target);
+if(!editor)return;
+_activate(editor);
+_keyActive=true;
+if(k==='Enter'){
+document.execCommand('insertParagraph',false,null);
+e.preventDefault();}
+e.stopImmediatePropagation();
 },true);
+
+document.addEventListener('keyup',function(){
+_keyActive=false;
+},true);
+
+// Block beforeinput/input from CM6
+document.addEventListener('beforeinput',function(e){
+if(!_active)return;
+if(_inCmEditor(e.target))e.stopImmediatePropagation();
+},true);
+
+document.addEventListener('input',function(e){
+if(!_active)return;
+if(_inCmEditor(e.target))e.stopImmediatePropagation();
+},true);
+
+// Block selectionchange always while active — CM6 maps selection
+// against its stale doc state and jumps the cursor.
+document.addEventListener('selectionchange',function(e){
+if(_active)e.stopImmediatePropagation();
+},true);
+
+// On click inside active editor: deactivate (sync), let CM6 process
+// the click normally to position cursor, then reactivate.
+document.addEventListener('mousedown',function(e){
+if(!_active)return;
+if(!_inCmEditor(e.target))return;
+var editor=_active;
+_deactivate();
+// Reactivate on next keypress — _active is null so click flows
+// through to CM6 as normal (cursor positioning, selection, etc).
+},true);
+
+// Deactivate on focusout
+document.addEventListener('focusout',function(e){
+if(!_active)return;
+var editor=_active;
+setTimeout(function(){
+var ae=document.activeElement;
+if(!ae||!editor.contains(ae))_deactivate();
+},0);
+},true);
+
+// MO wrapper: suppress CM6 MO while active or syncing
+window.MutationObserver=function(callback){
+var _isCM=false;
+var _obs;
+var _wrappedCb=function(mutations,observer){
+if(!_isCM){callback(mutations,observer);return;}
+if(!_active&&!_syncing)callback(mutations,observer);};
+_obs=new _OrigMO(_wrappedCb);
+var _origTR=_obs.takeRecords.bind(_obs);
+_obs.takeRecords=function(){
+var real=_origTR();
+if(!_isCM||(!_active&&!_syncing))return real;
+return [];};
+var _origObs=_obs.observe.bind(_obs);
+_obs.observe=function(target,options){
+if(!_isCM){var p=target;
+while(p){if(p.classList&&p.classList.contains('cm-editor')){
+_isCM=true;break;}p=p.parentElement;}}
+return _origObs(target,options);};
+_obs.disconnect=_obs.disconnect.bind(_obs);
+return _obs;};
+window.MutationObserver.prototype=_OrigMO.prototype;
 })();
 
 // ── CM6 drag-selection relay ──────────────────────────────────────────

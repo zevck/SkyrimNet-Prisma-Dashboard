@@ -592,7 +592,7 @@ static std::string PatchBundle(std::string body)
                         updateVar + ".docChanged){const _ss=" + updateVar + ".state;"
                         "self._snpdView=" + updateVar + ".view;"
                         "clearTimeout(self._snpdCmTmr);self._snpdCmTmr=setTimeout(()=>" +
-                        cbVar + "(_ss.doc.toString()),600)}";
+                        cbVar + "(_ss.doc.toString()),1500)}";
                     body.replace(cp, constructed.size(), rep);
                     mark("codemirror-debounce");
                 } else {
