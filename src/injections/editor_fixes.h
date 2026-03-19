@@ -47,10 +47,10 @@ opacity:1!important;}
 
 /* ── Native caret while CM6 is bypassed ──────────────────────────── */
 .cm-editing .cm-cursorLayer{display:none!important;}
-.cm-editing .cm-content{caret-color:#e5e7eb!important;}
-/* Hide CM6 selection highlights while bypassed — native selection
-   handles visual feedback; stale CM6 divs cause ghost highlights. */
+.cm-editing .cm-content{caret-color:transparent!important;}
 .cm-editing .cm-selectionLayer{display:none!important;}
+#_snpd_cur{position:fixed;width:1.5px;background:#e5e7eb;
+pointer-events:none;z-index:9999;display:none;}
 </style>
 <script>
 // CM6 full bypass: block all 5 CM6 input paths while editing.
@@ -62,6 +62,9 @@ var _OrigMO=window.MutationObserver;
 var _active=null;
 var _syncing=false;
 var _keyActive=false;
+var _idleT=0;var _syncT=0;var _curVis=false;
+var _curEl=document.createElement('div');
+_curEl.id='_snpd_cur';
 
 function _inCmEditor(el){
 var p=el;
@@ -110,6 +113,9 @@ function _deactivate(){
 if(!_active)return;
 var editor=_active;
 _active=null;
+if(_idleT){clearTimeout(_idleT);_idleT=0;}
+if(_syncT){clearTimeout(_syncT);_syncT=0;}
+if(_curVis){_curEl.style.display='none';_curVis=false;}
 _syncToCM6(editor);
 editor.classList.remove('cm-editing');}
 
@@ -124,21 +130,37 @@ var editor=_inCmEditor(e.target);
 if(!editor)return;
 _activate(editor);
 _keyActive=true;
+if(_idleT){clearTimeout(_idleT);_idleT=0;}
+if(_syncT){clearTimeout(_syncT);_syncT=0;}
+if(_curVis){_curEl.style.display='none';_curVis=false;}
 if(k==='Enter'){
 document.execCommand('insertParagraph',false,null);
 e.preventDefault();}
-// Arrow keys: force Ultralight to repaint the native caret.
-// Without a DOM mutation the software renderer may skip painting it.
-if(k==='ArrowLeft'||k==='ArrowRight'||k==='ArrowUp'||k==='ArrowDown'
-||k==='Home'||k==='End'){
-var ct=editor.querySelector('.cm-content');
-if(ct){ct.style.outline='0px solid transparent';
-requestAnimationFrame(function(){ct.style.outline='';});}}
 e.stopImmediatePropagation();
 },true);
 
 document.addEventListener('keyup',function(){
 _keyActive=false;
+if(_active){var ed=_active;
+if(_idleT)clearTimeout(_idleT);
+_idleT=setTimeout(function(){_idleT=0;
+if(_active!==ed)return;
+if(!document.body.contains(_curEl))document.body.appendChild(_curEl);
+requestAnimationFrame(function(){
+var s=window.getSelection();
+if(!s||!s.rangeCount||!s.isCollapsed)return;
+var r=s.getRangeAt(0).getBoundingClientRect();
+if(r.height<2){var n=s.focusNode;
+if(n&&n.nodeType===3)n=n.parentElement;
+if(n)r=n.getBoundingClientRect();}
+if(r.height<2)return;
+_curEl.style.cssText='position:fixed;width:1px;background:#3b82f6;'+
+'pointer-events:none;z-index:9999;left:'+r.left+'px;top:'+r.top+
+'px;height:'+r.height+'px;display:block;';
+_curVis=true;});},100);
+if(_syncT)clearTimeout(_syncT);
+_syncT=setTimeout(function(){_syncT=0;
+if(_active===ed)_syncToCM6(ed);},2000);}
 },true);
 
 // Block beforeinput/input from CM6
