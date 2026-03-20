@@ -20,18 +20,6 @@
 #include "shell_html.h"
 #include "http_proxy.h"
 
-static void SetupLog()
-{
-    auto logsFolder = SKSE::log::log_directory();
-    if (!logsFolder) return;
-    auto logPath = *logsFolder / std::filesystem::path(PLUGIN_NAME).replace_extension(".log");
-    auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath.string(), true);
-    auto logger = std::make_shared<spdlog::logger>(PLUGIN_NAME, fileSink);
-    logger->set_level(spdlog::level::info);
-    logger->flush_on(spdlog::level::info);
-    spdlog::set_default_logger(logger);
-}
-
 static void OnToggleInspector()
 {
     if (!s_PrismaUI || !s_PrismaUI->IsValid(s_View)) return;

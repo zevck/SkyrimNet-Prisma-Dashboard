@@ -47,7 +47,7 @@ If the panel opens but shows a blank page or an error:
 Update `SKSE/Plugins/SkyrimNetPrismaDashboard.ini` to match where SkyrimNet is actually running.
    - On most setups, `http://localhost:8080/` works without any changes.
 
-The prompt editor only validates when clicking out of the text editor due to limitations.
+The prompt editor only validates when clicking out of the text box due to limitations.
 
 ---
 

@@ -30,6 +30,33 @@ static DashboardSettings s_cfg;
 static std::mutex        s_cfgMtx;  // protects concurrent reads/writes of s_cfg from HTTP handler threads
 static std::string       s_iniPath; // full path to the INI, populated in Load
 
+// Escape a string for safe inclusion inside a JSON double-quoted value.
+// Handles \, ", and control characters (U+0000 through U+001F).
+static std::string JsonEscape(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        switch (c) {
+        case '"':  out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b";  break;
+        case '\f': out += "\\f";  break;
+        case '\n': out += "\\n";  break;
+        case '\r': out += "\\r";  break;
+        case '\t': out += "\\t";  break;
+        default:
+            if (c < 0x20) {
+                char h[8]; snprintf(h, sizeof(h), "\\u%04X", c);
+                out += h;
+            } else {
+                out += static_cast<char>(c);
+            }
+        }
+    }
+    return out;
+}
+
 // DX scancode → display name for the settings UI
 static std::string DxKeyName(int dx)
 {
@@ -66,9 +93,8 @@ static std::string DxKeyName(int dx)
 // Build JSON for current settings (for /settings-get)
 static std::string SettingsToJson()
 {
-    // Escape backslashes in lastPage URL (shouldn't have any but be safe)
-    std::string lp; for (auto c : s_cfg.lastPage) { if(c=='"'||c=='\\') lp+='\\'; lp+=c; }
-    std::string url; for (auto c : s_cfg.url) { if(c=='"'||c=='\\') url+='\\'; url+=c; }
+    std::string lp = JsonEscape(s_cfg.lastPage);
+    std::string url = JsonEscape(s_cfg.url);
     // Build key list JSON array for the UI dropdown
     static const std::pair<int,const char*> kNames[] = {
         {0x3B,"F1"},{0x3C,"F2"},{0x3D,"F3"},{0x3E,"F4"},

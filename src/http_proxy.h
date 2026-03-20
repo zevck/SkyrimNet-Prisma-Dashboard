@@ -9,6 +9,25 @@ static void OnToggle();
 // is always CORS-checked by WebKit regardless of the crossorigin attribute,
 // so the only way to avoid it is to serve everything from the same origin.
 
+// Thread-safe hostname resolution.  gethostbyname() returns a pointer to
+// static storage, so concurrent calls from the per-connection HTTP threads
+// would corrupt each other's results.  The mutex serialises the slow path;
+// the fast path (dotted-decimal IPs like "127.0.0.1") never takes the lock.
+static std::mutex s_dnsMtx;
+static bool ResolveHost(const std::string& host, sockaddr_in& addr)
+{
+    auto ipAddr = inet_addr(host.c_str());
+    if (ipAddr != INADDR_NONE) {
+        addr.sin_addr.s_addr = ipAddr;
+        return true;
+    }
+    std::lock_guard<std::mutex> lk(s_dnsMtx);
+    struct hostent* he = gethostbyname(host.c_str());
+    if (!he) return false;
+    addr.sin_addr.s_addr = *reinterpret_cast<u_long*>(he->h_addr_list[0]);
+    return true;
+}
+
 // Infer a Content-Type header value from a URL path's file extension.
 static std::string ContentTypeFromPath(const std::string& path)
 {
@@ -44,14 +63,10 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(port);
-    // inet_addr only handles dotted-decimal; resolve hostnames (e.g. "localhost") via gethostbyname
-    auto ipAddr = inet_addr(host.c_str());
-    if (ipAddr == INADDR_NONE) {
-        struct hostent* he = gethostbyname(host.c_str());
-        if (!he) { closesocket(s); return {"", "text/plain", 503}; }
-        ipAddr = *reinterpret_cast<u_long*>(he->h_addr_list[0]);
+    if (!ResolveHost(host, addr)) {
+        closesocket(s);
+        return {"", "text/plain", 503};
     }
-    addr.sin_addr.s_addr = ipAddr;
 
     if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
         closesocket(s);
@@ -729,13 +744,10 @@ static bool TryStreamProxy(SOCKET client,
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(port);
-    auto ipAddr = inet_addr(host.c_str());
-    if (ipAddr == INADDR_NONE) {
-        struct hostent* he = gethostbyname(host.c_str());
-        if (!he) { closesocket(s); return false; }
-        ipAddr = *reinterpret_cast<u_long*>(he->h_addr_list[0]);
+    if (!ResolveHost(host, addr)) {
+        closesocket(s);
+        return false;
     }
-    addr.sin_addr.s_addr = ipAddr;
     if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
         closesocket(s); return false;
     }
@@ -1162,10 +1174,7 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
                     if (GetSaveFileNameA(&ofn)) {
-                        std::string jsonPath;
-                        for (char c : std::string(fileBuf))
-                            if (c == '\\') jsonPath += "\\\\"; else jsonPath += c;
-                        body = "{\"path\":\"" + jsonPath + "\"}";
+                        body = "{\"path\":\"" + JsonEscape(std::string(fileBuf)) + "\"}";
                     } else {
                         body = "{\"cancelled\":true}";
                     }
@@ -1219,10 +1228,7 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                 if (ofs) {
                     ofs.write(reqBody.data(), static_cast<std::streamsize>(reqBody.size()));
                     ofs.close();
-                    std::string jsonPath;
-                    for (auto c : savePath)
-                        if (c == '\\') jsonPath += "\\\\"; else jsonPath += c;
-                    body = "{\"saved\":true,\"path\":\"" + jsonPath + "\"}";
+                    body = "{\"saved\":true,\"path\":\"" + JsonEscape(savePath) + "\"}";
                     logger::info("SkyrimNetDashboard: saved file '{}' ({} bytes)", savePath, reqBody.size());
                 } else {
                     body = "{\"saved\":false,\"error\":\"Could not write file\"}";
@@ -1334,10 +1340,7 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                             else if (ext == "mp4")               mime = "video/mp4";
                         }
                         // Escape backslashes for JSON
-                        std::string jsonPath;
-                        for (char c : fp)
-                            if (c == '\\') jsonPath += "\\\\"; else jsonPath += c;
-                        body = "{\"path\":\"" + jsonPath + "\",\"mimeType\":\"" + mime + "\"}";
+                        body = "{\"path\":\"" + JsonEscape(fp) + "\",\"mimeType\":\"" + mime + "\"}";
                         logger::info("SkyrimNetDashboard: /open-dialog: user chose '{}'", fp);
                     } else {
                         body = "{\"cancelled\":true}";
@@ -1717,7 +1720,7 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                         auto p2 = body.find("</p>");
                         if (p1 != std::string::npos && p2 != std::string::npos && p2 > p1)
                             msg = body.substr(p1 + 3, p2 - p1 - 3);
-                        body = "{\"error\":\"" + msg + "\"}";
+                        body = "{\"error\":\"" + JsonEscape(msg) + "\"}";
                         contentType = "application/json";
                     }
                     else if (contentType.find("javascript") != std::string::npos && !body.empty())

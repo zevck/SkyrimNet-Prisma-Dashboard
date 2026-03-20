@@ -170,8 +170,11 @@ static bool TranscodeToWav(const std::wstring& srcPath, const std::wstring& dstP
 {
     // MFStartup is called once at plugin load; do not call it here.
     // Each background thread that uses MF must initialize COM first.
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED); // idempotent if already inited
-    struct ComGuard { ~ComGuard() { CoUninitialize(); } } _cg;
+    HRESULT _coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // Only call CoUninitialize if we actually initialized COM (S_OK).
+    // S_FALSE means it was already initialized on this thread — calling
+    // CoUninitialize would tear down the thread's COM context prematurely.
+    struct ComGuard { HRESULT hr; ~ComGuard() { if (hr == S_OK) CoUninitialize(); } } _cg{_coHr};
 
     // ── Source reader ──────────────────────────────────────────────────────
     IMFSourceReader* pReader = nullptr;
