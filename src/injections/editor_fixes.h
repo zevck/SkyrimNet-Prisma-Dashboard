@@ -62,7 +62,7 @@ var _OrigMO=window.MutationObserver;
 var _active=null;
 var _syncing=false;
 var _keyActive=false;
-var _idleT=0;var _syncT=0;var _curVis=false;
+var _idleT=0;var _curVis=false;
 var _curEl=document.createElement('div');
 _curEl.id='_snpd_cur';
 
@@ -114,9 +114,20 @@ if(!_active)return;
 var editor=_active;
 _active=null;
 if(_idleT){clearTimeout(_idleT);_idleT=0;}
-if(_syncT){clearTimeout(_syncT);_syncT=0;}
 if(_curVis){_curEl.style.display='none';_curVis=false;}
+console.log('[snpd] _deactivate: syncing to CM6');
 _syncToCM6(editor);
+// Flush app's onChange immediately so React state is current
+// before any Save handler reads it. Clear debounce timer AFTER
+// _syncToCM6 because dispatch triggers updateListener which
+// sets a new 1500ms timer — we must cancel that too.
+if(self._snpdCmCb){clearTimeout(self._snpdCmTmr);
+try{var v=_getView(editor);
+if(v){var txt=v.state.doc.toString();
+console.log('[snpd] _deactivate: calling _snpdCmCb, text length='+txt.length);
+self._snpdCmCb(txt);}}catch(_e){
+console.error('[snpd] _deactivate: _snpdCmCb threw',_e);}}
+clearTimeout(self._snpdCmTmr);
 editor.classList.remove('cm-editing');}
 
 // Block keydown — native contenteditable handles chars/backspace/delete.
@@ -131,7 +142,6 @@ if(!editor)return;
 _activate(editor);
 _keyActive=true;
 if(_idleT){clearTimeout(_idleT);_idleT=0;}
-if(_syncT){clearTimeout(_syncT);_syncT=0;}
 if(_curVis){_curEl.style.display='none';_curVis=false;}
 if(k==='Enter'){
 document.execCommand('insertParagraph',false,null);
@@ -157,10 +167,7 @@ if(r.height<2)return;
 _curEl.style.cssText='position:fixed;width:1px;background:#3b82f6;'+
 'pointer-events:none;z-index:9999;left:'+r.left+'px;top:'+r.top+
 'px;height:'+r.height+'px;display:block;';
-_curVis=true;});},100);
-if(_syncT)clearTimeout(_syncT);
-_syncT=setTimeout(function(){_syncT=0;
-if(_active===ed)_syncToCM6(ed);},2000);}
+_curVis=true;});},100);}
 },true);
 
 // Block beforeinput/input from CM6
@@ -180,25 +187,21 @@ document.addEventListener('selectionchange',function(e){
 if(_active)e.stopImmediatePropagation();
 },true);
 
-// On click inside active editor: deactivate (sync), let CM6 process
-// the click normally to position cursor, then reactivate.
+// On click: deactivate so CM6 handles cursor positioning.
 document.addEventListener('mousedown',function(e){
 if(!_active)return;
-if(!_inCmEditor(e.target))return;
-var editor=_active;
 _deactivate();
-// Reactivate on next keypress — _active is null so click flows
-// through to CM6 as normal (cursor positioning, selection, etc).
 },true);
 
-// Deactivate on focusout
+// Deactivate on focusout — fires BEFORE click in DOM event order,
+// so CM6 state is synced before any Save handler reads it.
+// Use relatedTarget (sync) instead of setTimeout+activeElement (async).
 document.addEventListener('focusout',function(e){
 if(!_active)return;
 var editor=_active;
-setTimeout(function(){
-var ae=document.activeElement;
-if(!ae||!editor.contains(ae))_deactivate();
-},0);
+var related=e.relatedTarget;
+if(related&&editor.contains(related))return;
+_deactivate();
 },true);
 
 // MO wrapper: suppress CM6 MO while active or syncing

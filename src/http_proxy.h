@@ -591,6 +591,7 @@ static std::string PatchBundle(std::string body)
                     std::string rep =
                         updateVar + ".docChanged){const _ss=" + updateVar + ".state;"
                         "self._snpdView=" + updateVar + ".view;"
+                        "self._snpdCmCb=" + cbVar + ";"
                         "clearTimeout(self._snpdCmTmr);self._snpdCmTmr=setTimeout(()=>" +
                         cbVar + "(_ss.doc.toString()),1500)}";
                     body.replace(cp, constructed.size(), rep);
@@ -1673,8 +1674,12 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     // EXCLUDE bulk-clone and bulk-clone-cancel: those are REST
                     // API calls whose responses must be buffered as JSON to be
                     // consumed by response.json() in the UI.
+                    // EXCLUDE PUT/DELETE: never streaming, and TryStreamProxy
+                    // sends the request then discards it if response has
+                    // Content-Length, causing a double-send via FetchResource.
                     const bool isBulkClone = path.find("bulk-clone") != std::string::npos;
-                    if (!isBulkClone &&
+                    const bool skipStream  = isBulkClone || method == "PUT" || method == "DELETE";
+                    if (!skipStream &&
                         TryStreamProxy(client, proxyHost, proxyPort, method, path, reqCT, reqBody)) {
                         closesocket(client);
                         return;
@@ -1683,8 +1688,30 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     body        = std::move(resBody);
                     contentType = std::move(resCt);
                     upstreamStatus = resSc;
-                    if (contentType.find("text/html") != std::string::npos && !body.empty())
+                    // Log non-GET API calls for debugging save issues
+                    if (method != "GET") {
+                        logger::info("SkyrimNetDashboard: {} {} -> {} (ct={}, bodyLen={})",
+                            method, path, upstreamStatus, contentType, body.size());
+                        if (upstreamStatus >= 400)
+                            logger::warn("SkyrimNetDashboard: error response body: {}",
+                                body.substr(0, 500));
+                    }
+                    if (contentType.find("text/html") != std::string::npos && !body.empty()
+                        && upstreamStatus >= 200 && upstreamStatus < 300)
                         body = InjectPatches(std::move(body));
+                    // Convert HTML error pages to JSON so the React app shows
+                    // a clean message instead of raw HTML markup.
+                    else if (contentType.find("text/html") != std::string::npos && !body.empty()
+                             && upstreamStatus >= 400) {
+                        // Extract text between <p>...</p> for a clean message
+                        std::string msg = "Server error";
+                        auto p1 = body.find("<p>");
+                        auto p2 = body.find("</p>");
+                        if (p1 != std::string::npos && p2 != std::string::npos && p2 > p1)
+                            msg = body.substr(p1 + 3, p2 - p1 - 3);
+                        body = "{\"error\":\"" + msg + "\"}";
+                        contentType = "application/json";
+                    }
                     else if (contentType.find("javascript") != std::string::npos && !body.empty())
                         body = PatchBundle(std::move(body));
                     else if (contentType.find("text/css") != std::string::npos && !body.empty())
