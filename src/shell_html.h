@@ -163,6 +163,7 @@ iframe{width:100%;height:100%;border:none;display:block}
     fs=!fs;localStorage.setItem('snpd-fs',String(fs));applyFs();snpdSaveLayout();
   });
   B.addEventListener('dblclick',function(e){
+    if(e.target.closest('button'))return;
     fs=!fs;localStorage.setItem('snpd-fs',String(fs));applyFs();snpdSaveLayout();
   });
   HB.addEventListener('mousedown',function(e){e.stopPropagation();});
