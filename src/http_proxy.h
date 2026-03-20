@@ -289,7 +289,8 @@ static std::string PatchCSS(std::string body)
     }
 
     // CSS animations (keyframes) also cause continuous repaints in Ultralight.
-    // Strip animation: and animation-* declarations.
+    // Strip animation: and animation-* declarations, but preserve spin/rotate
+    // animations used for loading spinners (important for perceived responsiveness).
     {
         int count = 0;
         std::string::size_type pos = 0;
@@ -309,6 +310,14 @@ static std::string PatchCSS(std::string body)
             }
             auto semi = body.find(';', pos);
             if (semi == std::string::npos) break;
+            // Check if this animation value references a spinner/rotate
+            std::string val = body.substr(pos, semi - pos);
+            if (val.find("spin") != std::string::npos ||
+                val.find("rotate") != std::string::npos ||
+                val.find("loading") != std::string::npos) {
+                pos = semi + 1;
+                continue;  // preserve spinner animations
+            }
             std::fill(body.begin() + pos, body.begin() + semi + 1, ' ');
             pos = semi + 1;
             ++count;
