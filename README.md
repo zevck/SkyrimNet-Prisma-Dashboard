@@ -58,7 +58,7 @@ Location: `SKSE/Plugins/SkyrimNetPrismaDashboard.ini`
 ; The URL of your SkyrimNet server.
 URL=http://localhost:8080/
 
-; The hotkey that toggles the dashboard (virtual key code, decimal).
+; The hotkey that toggles the dashboard
 HotKey=62
 
 ; Keep the menu rendered without focus (1 = yes, 0 = no).
