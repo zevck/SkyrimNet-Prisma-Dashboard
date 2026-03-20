@@ -181,7 +181,6 @@ static std::string InjectPatches(std::string body)
     std::string injection = 
         Injections::GetEditorFixes() +
         "<script>\n" +
-        Injections::GetTestPageAudio() +
         Injections::GetClipboardIntegration() +
         Injections::GetAudioPolyfill() +
         Injections::GetDragSelect() +

@@ -38,7 +38,7 @@ You can change all settings from inside the game by clicking the ⚙ button in t
 
 ---
 
-## If the Dashboard Doesn't Load
+## Notes
 
 The dashboard connects to the SkyrimNet server running on your PC. By default it looks at `http://localhost:8080/`.
 
@@ -46,6 +46,8 @@ If the panel opens but shows a blank page or an error:
 
 Update `SKSE/Plugins/SkyrimNetPrismaDashboard.ini` to match where SkyrimNet is actually running.
    - On most setups, `http://localhost:8080/` works without any changes.
+
+The prompt editor only validates when clicking out of the text editor due to limitations.
 
 ---
 
