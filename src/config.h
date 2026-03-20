@@ -111,6 +111,8 @@ static std::string SettingsToJson()
         "}";
 }
 
+static void SaveSettings();
+
 static void LoadSettings()
 {
     // Locate the INI next to the DLL: <SKSE log dir>/../../Plugins/...ini
@@ -157,6 +159,43 @@ static void LoadSettings()
     logger::info("SkyrimNetDashboard: INI loaded from '{}'", s_iniPath);
     logger::info("  URL={} HotKey=0x{:02X} keepBg={} defaultHome={} pauseGame={}",
         s_cfg.url, s_cfg.hotKey, s_cfg.keepBg, s_cfg.defaultHome, s_cfg.pauseGame);
+
+    // Auto-generate INI with defaults and comments if it doesn't exist on disk
+    if (GetFileAttributesA(s_iniPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::ofstream iniFile(s_iniPath);
+        if (iniFile.is_open()) {
+            iniFile
+                << "[Dashboard]\n"
+                << "; Full URL to your SkyrimNet instance, including port.\n"
+                << "; Default http://localhost:8080/ works for most setups.\n"
+                << "; If it doesn't, replace with your local IP, e.g. http://192.168.1.100:8080/\n"
+                << "URL=" << s_cfg.url << "\n"
+                << "\n"
+                << "; Last visited page - updated automatically, do not edit manually.\n"
+                << "LastPage=" << s_cfg.url << "\n"
+                << "\n"
+                << "; Keep the menu rendered without focus (1 = yes, 0 = no).\n"
+                << "KeepBackground=0\n"
+                << "\n"
+                << "; Always open the base URL instead of resuming the last visited page (1 = yes, 0 = no).\n"
+                << "DefaultHome=0\n"
+                << "\n"
+                << "; Pause Skyrim while the dashboard is focused (1 = yes, 0 = no).\n"
+                << "PauseGame=0\n"
+                << "\n"
+                << "; Hotkey to open/close the dashboard (DirectInput scan code, decimal).\n"
+                << "; Default 62 = F4. Common keys: 59=F1, 60=F2, 61=F3, 62=F4, 63=F5,\n"
+                << "; 64=F6, 65=F7, 66=F8, 67=F9, 68=F10, 87=F11, 88=F12.\n"
+                << "HotKey=62\n"
+                << "\n"
+                << "; Internal version marker - do not edit.\n"
+                << "Version=2\n";
+            iniFile.close();
+            logger::info("SkyrimNetDashboard: INI auto-generated with defaults");
+        } else {
+            logger::warn("SkyrimNetDashboard: failed to create INI at '{}'", s_iniPath);
+        }
+    }
 }
 
 static void SaveSettings()
