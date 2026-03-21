@@ -79,6 +79,15 @@ document.addEventListener('mousedown',function(e){
   _as.tid=setTimeout(tick,16);
 },true);
 
+// Middle button released: if mouse moved from origin, it was a
+// hold-and-drag — stop on release.  If it barely moved, it was a
+// quick tap — keep scrolling (user clicks/scrolls/escapes to stop).
+document.addEventListener('mouseup',function(e){
+  if(e.button!==1||!_as)return;
+  var dx=_as.cx-_as.ox,dy=_as.cy-_as.oy;
+  if(Math.abs(dx)>10||Math.abs(dy)>10) stop();
+},true);
+
 document.addEventListener('keydown',function(e){
   if(_as&&e.key==='Escape'){stop();e.preventDefault();}
 },true);
