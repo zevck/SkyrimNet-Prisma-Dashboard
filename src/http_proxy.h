@@ -65,10 +65,6 @@ static bool ConnectWithTimeout(SOCKET s, sockaddr_in& addr, int timeoutMs = 5000
 
     u_long block = 0;
     ioctlsocket(s, FIONBIO, &block);
-    // Set recv timeout so we don't block forever on a hung backend.
-    DWORD rcvTimeout = static_cast<DWORD>(timeoutMs * 2);
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
-               reinterpret_cast<const char*>(&rcvTimeout), sizeof(rcvTimeout));
     return true;
 }
 
@@ -146,14 +142,8 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
     while ((n = recv(s, buf, sizeof(buf), 0)) > 0)
         response.append(buf, n);
     if (n == SOCKET_ERROR) {
-        int err = WSAGetLastError();
-        // WSAETIMEDOUT (10060) is expected when SO_RCVTIMEO fires on a hung backend.
-        if (err == WSAETIMEDOUT)
-            logger::warn("SkyrimNetDashboard: FetchResource recv timed out for {} {} (got {} bytes so far)",
-                         method, path, response.size());
-        else
-            logger::warn("SkyrimNetDashboard: FetchResource recv error for {} {} (WSA={}, {} bytes so far)",
-                         method, path, err, response.size());
+        logger::warn("SkyrimNetDashboard: FetchResource recv error for {} {} (WSA={}, {} bytes so far)",
+                     method, path, WSAGetLastError(), response.size());
     }
     closesocket(s);
 
@@ -885,28 +875,26 @@ static bool TryStreamProxy(SOCKET client,
     std::string alreadyRead   = headerBuf.substr(sepPos + 4);
 
     // If the upstream response carries a Content-Length, it is a normal
-    // bufferable response.  We MUST forward it here rather than returning
-    // false (which would cause FetchResource to re-send the request,
-    // double-firing any state-changing POST/PATCH — e.g. a toggle endpoint
-    // would flip twice and appear to do nothing).
+    // bufferable response.  For GET we hand off to FetchResource (which
+    // applies InjectPatches / PatchBundle / PatchCSS / asset caching).
+    // For non-GET we MUST forward here — returning false would cause
+    // FetchResource to re-send the request, double-firing any
+    // state-changing POST (e.g. a toggle would flip twice → no change).
     std::string hdrlower;
     hdrlower.reserve(headerSection.size());
     for (auto c : headerSection)
         hdrlower += static_cast<char>(tolower(static_cast<unsigned char>(c)));
     if (hdrlower.find("content-length:") != std::string::npos) {
-        // GET is idempotent — safe to re-send via FetchResource, which
-        // applies InjectPatches / PatchBundle / PatchCSS / asset caching.
         if (method == "GET") {
             closesocket(s);
             return false;
         }
-        // Non-GET (POST, etc.): forward the full response here so
-        // FetchResource never re-sends the state-changing request.
+        // Non-GET: read the full body and forward with original headers.
         std::size_t clVal = 0;
-        auto clPos = hdrlower.find("content-length:");
-        if (clPos != std::string::npos) {
-            auto clEnd = headerSection.find("\r\n", clPos);
-            try { clVal = std::stoull(headerSection.substr(clPos + 15, clEnd - clPos - 15)); }
+        {
+            auto clp = hdrlower.find("content-length:");
+            auto cle = headerSection.find("\r\n", clp);
+            try { clVal = std::stoull(headerSection.substr(clp + 15, cle - clp - 15)); }
             catch (...) {}
         }
         std::string respBody = alreadyRead;
