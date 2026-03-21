@@ -28,6 +28,11 @@ static bool ResolveHost(const std::string& host, sockaddr_in& addr)
         return false;
     }
     addr.sin_addr.s_addr = *reinterpret_cast<u_long*>(he->h_addr_list[0]);
+    {
+        auto ip = addr.sin_addr.s_addr;
+        logger::info("SkyrimNetDashboard: resolved '{}' -> {}.{}.{}.{}",
+                     host, ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+    }
     return true;
 }
 
@@ -36,6 +41,9 @@ static bool ResolveHost(const std::string& host, sockaddr_in& addr)
 // backend is unreachable (e.g. SkyrimNet not running → black window).
 static bool ConnectWithTimeout(SOCKET s, sockaddr_in& addr, int timeoutMs = 5000)
 {
+    auto ip = addr.sin_addr.s_addr;
+    uint16_t port = ntohs(addr.sin_port);
+
     u_long nonBlock = 1;
     ioctlsocket(s, FIONBIO, &nonBlock);
 
@@ -51,14 +59,25 @@ static bool ConnectWithTimeout(SOCKET s, sockaddr_in& addr, int timeoutMs = 5000
             tv.tv_usec = (timeoutMs % 1000) * 1000;
             int sel = select(0, nullptr, &wrSet, &exSet, &tv);
             if (sel <= 0 || FD_ISSET(s, &exSet)) {
+                // Retrieve the actual socket-level error (more reliable than WSAGetLastError after select)
+                int soErr = 0; int soLen = sizeof(soErr);
+                getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soErr), &soLen);
                 u_long block = 0; ioctlsocket(s, FIONBIO, &block);
-                logger::warn("SkyrimNetDashboard: connect timed out after {}ms (sel={}, WSA={})",
-                             timeoutMs, sel, WSAGetLastError());
+                if (sel == 0)
+                    logger::warn("SkyrimNetDashboard: connect to {}.{}.{}.{}:{} timed out after {}ms",
+                                 ip & 0xFF, (ip>>8)&0xFF, (ip>>16)&0xFF, (ip>>24)&0xFF, port, timeoutMs);
+                else
+                    logger::warn("SkyrimNetDashboard: connect to {}.{}.{}.{}:{} refused "
+                                 "(sel={}, SO_ERROR={}, WSA={}, wrSet={}, exSet={})",
+                                 ip & 0xFF, (ip>>8)&0xFF, (ip>>16)&0xFF, (ip>>24)&0xFF, port,
+                                 sel, soErr, WSAGetLastError(),
+                                 FD_ISSET(s, &wrSet) ? 1 : 0, FD_ISSET(s, &exSet) ? 1 : 0);
                 return false;
             }
         } else {
             u_long block = 0; ioctlsocket(s, FIONBIO, &block);
-            logger::warn("SkyrimNetDashboard: connect failed immediately (WSA={})", err);
+            logger::warn("SkyrimNetDashboard: connect to {}.{}.{}.{}:{} failed immediately (WSA={})",
+                         ip & 0xFF, (ip>>8)&0xFF, (ip>>16)&0xFF, (ip>>24)&0xFF, port, err);
             return false;
         }
     }
@@ -66,6 +85,88 @@ static bool ConnectWithTimeout(SOCKET s, sockaddr_in& addr, int timeoutMs = 5000
     u_long block = 0;
     ioctlsocket(s, FIONBIO, &block);
     return true;
+}
+
+// ── IPv6 loopback fallback ───────────────────────────────────────────────────
+// ws2tcpip.h (which defines sockaddr_in6) conflicts with the winsock.h that
+// CommonLibSSE pulls in, so we define the minimal IPv6 structures manually.
+// This is ONLY used for the ::1 loopback fallback — not general IPv6 DNS.
+#ifndef AF_INET6
+#define AF_INET6 23
+#endif
+struct SockAddrIn6 {
+    short    sin6_family;   // AF_INET6
+    u_short  sin6_port;
+    u_long   sin6_flowinfo;
+    u_char   sin6_addr[16]; // ::1 = all zeros except last byte = 1
+    u_long   sin6_scope_id;
+};
+
+// Creates a connected socket to host:port.  Tries IPv4 first; if that fails
+// and the host is "localhost", tries IPv6 [::1] as a fallback (covers the
+// common case where SkyrimNet binds to [::1]:port only).
+// Once IPv6 succeeds, all future connections skip the IPv4 attempt.
+// Returns INVALID_SOCKET on failure.
+static std::atomic<bool> s_useIPv6{false}; // sticky: once IPv6 works, prefer it
+
+static SOCKET ConnectToHost(const std::string& host, uint16_t port)
+{
+    // ── IPv4 attempt (skip if we already know IPv6 is needed) ───────────
+    if (!s_useIPv6.load()) {
+        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s != INVALID_SOCKET) {
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port   = htons(port);
+            if (ResolveHost(host, addr) && ConnectWithTimeout(s, addr))
+                return s;
+            closesocket(s);
+        }
+    }
+
+    // ── IPv6 loopback fallback ──────────────────────────────────────────
+    if (host == "localhost") {
+        logger::info("SkyrimNetDashboard: IPv4 connect to localhost:{} failed, trying IPv6 [::1]", port);
+        SOCKET s6 = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+        if (s6 == INVALID_SOCKET) {
+            logger::warn("SkyrimNetDashboard: IPv6 socket() failed (WSA={})", WSAGetLastError());
+            return INVALID_SOCKET;
+        }
+        SockAddrIn6 addr6{};
+        addr6.sin6_family = static_cast<short>(AF_INET6);
+        addr6.sin6_port   = htons(port);
+        addr6.sin6_addr[15] = 1; // ::1
+
+        // Inline non-blocking connect (same logic as ConnectWithTimeout but
+        // for sockaddr_in6 which ConnectWithTimeout doesn't accept).
+        u_long nonBlock = 1;
+        ioctlsocket(s6, FIONBIO, &nonBlock);
+        int cr = connect(s6, reinterpret_cast<sockaddr*>(&addr6), sizeof(addr6));
+        if (cr == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+            fd_set wrSet, exSet;
+            FD_ZERO(&wrSet); FD_SET(s6, &wrSet);
+            FD_ZERO(&exSet); FD_SET(s6, &exSet);
+            timeval tv; tv.tv_sec = 5; tv.tv_usec = 0;
+            int sel = select(0, nullptr, &wrSet, &exSet, &tv);
+            if (sel <= 0 || FD_ISSET(s6, &exSet)) {
+                logger::warn("SkyrimNetDashboard: IPv6 [::1]:{} also failed (sel={})", port, sel);
+                u_long block = 0; ioctlsocket(s6, FIONBIO, &block);
+                closesocket(s6);
+                return INVALID_SOCKET;
+            }
+        } else if (cr == SOCKET_ERROR) {
+            logger::warn("SkyrimNetDashboard: IPv6 [::1]:{} connect error (WSA={})", port, WSAGetLastError());
+            closesocket(s6);
+            return INVALID_SOCKET;
+        }
+        u_long block = 0;
+        ioctlsocket(s6, FIONBIO, &block);
+        s_useIPv6.store(true);
+        logger::info("SkyrimNetDashboard: connected via IPv6 [::1]:{} (IPv6 cached for future connections)", port);
+        return s6;
+    }
+
+    return INVALID_SOCKET;
 }
 
 // Infer a Content-Type header value from a URL path's file extension.
@@ -96,24 +197,9 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
               const std::string& path, const std::string& reqContentType,
               const std::string& reqBody)
 {
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    SOCKET s = ConnectToHost(host, port);
     if (s == INVALID_SOCKET) {
-        logger::error("SkyrimNetDashboard: FetchResource socket() failed (WSA={})", WSAGetLastError());
-        return {"", "text/plain", 503};
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(port);
-    if (!ResolveHost(host, addr)) {
-        logger::error("SkyrimNetDashboard: FetchResource cannot resolve '{}' — is the hostname correct?", host);
-        closesocket(s);
-        return {"", "text/plain", 503};
-    }
-
-    if (!ConnectWithTimeout(s, addr)) {
-        logger::error("SkyrimNetDashboard: FetchResource cannot connect to {}:{} — is SkyrimNet running?", host, port);
-        closesocket(s);
+        logger::error("SkyrimNetDashboard: FetchResource cannot connect to {}:{}", host, port);
         return {"", "text/plain", 503};
     }
 
@@ -827,23 +913,10 @@ static bool TryStreamProxy(SOCKET client,
                             const std::string& method, const std::string& path,
                             const std::string& reqCT, const std::string& reqBody)
 {
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    SOCKET s = ConnectToHost(host, port);
     if (s == INVALID_SOCKET) {
-        logger::warn("SkyrimNetDashboard: TryStreamProxy socket() failed (WSA={})", WSAGetLastError());
-        return false;
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(port);
-    if (!ResolveHost(host, addr)) {
-        logger::warn("SkyrimNetDashboard: TryStreamProxy cannot resolve '{}'", host);
-        closesocket(s);
-        return false;
-    }
-    if (!ConnectWithTimeout(s, addr)) {
         logger::warn("SkyrimNetDashboard: TryStreamProxy cannot connect to {}:{}", host, port);
-        closesocket(s); return false;
+        return false;
     }
 
     // Build and send the HTTP request (same format as FetchResource).
