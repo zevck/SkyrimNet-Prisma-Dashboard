@@ -126,7 +126,8 @@ static SOCKET ConnectToHost(const std::string& host, uint16_t port)
 
     // ── IPv6 loopback fallback ──────────────────────────────────────────
     if (host == "localhost") {
-        logger::info("SkyrimNetDashboard: IPv4 connect to localhost:{} failed, trying IPv6 [::1]", port);
+        if (!s_useIPv6.load())
+            logger::info("SkyrimNetDashboard: IPv4 connect to localhost:{} failed, trying IPv6 [::1]", port);
         SOCKET s6 = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
         if (s6 == INVALID_SOCKET) {
             logger::warn("SkyrimNetDashboard: IPv6 socket() failed (WSA={})", WSAGetLastError());

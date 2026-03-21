@@ -57,35 +57,35 @@ static std::string JsonEscape(const std::string& s)
     return out;
 }
 
-// DX scancode → display name for the settings UI
+// DX scancode → display name table (shared by DxKeyName and SettingsToJson)
+static const std::pair<int,const char*> s_dxKeyNames[] = {
+    {0x3B,"F1"},{0x3C,"F2"},{0x3D,"F3"},{0x3E,"F4"},
+    {0x3F,"F5"},{0x40,"F6"},{0x41,"F7"},{0x42,"F8"},
+    {0x43,"F9"},{0x44,"F10"},{0x57,"F11"},{0x58,"F12"},
+    {0x02,"1"},{0x03,"2"},{0x04,"3"},{0x05,"4"},{0x06,"5"},
+    {0x07,"6"},{0x08,"7"},{0x09,"8"},{0x0A,"9"},{0x0B,"0"},
+    {0x10,"Q"},{0x11,"W"},{0x12,"E"},{0x13,"R"},{0x14,"T"},
+    {0x15,"Y"},{0x16,"U"},{0x17,"I"},{0x18,"O"},{0x19,"P"},
+    {0x1E,"A"},{0x1F,"S"},{0x20,"D"},{0x21,"F"},{0x22,"G"},
+    {0x23,"H"},{0x24,"J"},{0x25,"K"},{0x26,"L"},
+    {0x2C,"Z"},{0x2D,"X"},{0x2E,"C"},{0x2F,"V"},{0x30,"B"},
+    {0x31,"N"},{0x32,"M"},
+    {0x29,"Tilde (~)"},{0x0C,"Minus (-)"},{0x0D,"Equals (=)"},
+    {0x1A,"["},{0x1B,"]"},{0x27,";"},{0x28,"'"},{0x56,"\\"},
+    {0x33,","},{0x34,"."},{0x35,"/"},
+    {0xC7,"Home"},{0xD2,"Insert"},{0xD3,"Delete"},
+    {0xC9,"Page Up"},{0xD1,"Page Down"},{0xC8,"Up"},{0xD0,"Down"},
+    {0xCB,"Left"},{0xCD,"Right"},
+    {0x52,"Numpad 0"},{0x4F,"Numpad 1"},{0x50,"Numpad 2"},
+    {0x51,"Numpad 3"},{0x4B,"Numpad 4"},{0x4C,"Numpad 5"},
+    {0x4D,"Numpad 6"},{0x47,"Numpad 7"},{0x48,"Numpad 8"},
+    {0x49,"Numpad 9"},{0x4E,"Numpad +"},{0x4A,"Numpad -"},
+    {0x37,"Numpad *"},{0xB5,"Numpad /"},
+};
+
 static std::string DxKeyName(int dx)
 {
-    // Common keys a user would pick for a toggle
-    static const std::pair<int,const char*> kNames[] = {
-        {0x3B,"F1"},{0x3C,"F2"},{0x3D,"F3"},{0x3E,"F4"},
-        {0x3F,"F5"},{0x40,"F6"},{0x41,"F7"},{0x42,"F8"},
-        {0x43,"F9"},{0x44,"F10"},{0x57,"F11"},{0x58,"F12"},
-        {0x02,"1"},{0x03,"2"},{0x04,"3"},{0x05,"4"},{0x06,"5"},
-        {0x07,"6"},{0x08,"7"},{0x09,"8"},{0x0A,"9"},{0x0B,"0"},
-        {0x10,"Q"},{0x11,"W"},{0x12,"E"},{0x13,"R"},{0x14,"T"},
-        {0x15,"Y"},{0x16,"U"},{0x17,"I"},{0x18,"O"},{0x19,"P"},
-        {0x1E,"A"},{0x1F,"S"},{0x20,"D"},{0x21,"F"},{0x22,"G"},
-        {0x23,"H"},{0x24,"J"},{0x25,"K"},{0x26,"L"},
-        {0x2C,"Z"},{0x2D,"X"},{0x2E,"C"},{0x2F,"V"},{0x30,"B"},
-        {0x31,"N"},{0x32,"M"},
-        {0x29,"Tilde (~)"},{0x0C,"Minus (-)"},{0x0D,"Equals (=)"},
-        {0x1A,"["},{0x1B,"]"},{0x27,";"},{0x28,"'"},{0x56,"\\"},
-        {0x33,","},{0x34,"."},{0x35,"/"},
-        {0xC7,"Home"},{0xD2,"Insert"},{0xD3,"Delete"},
-        {0xC9,"Page Up"},{0xD1,"Page Down"},{0xC8,"Up"},{0xD0,"Down"},
-        {0xCB,"Left"},{0xCD,"Right"},
-        {0x52,"Numpad 0"},{0x4F,"Numpad 1"},{0x50,"Numpad 2"},
-        {0x51,"Numpad 3"},{0x4B,"Numpad 4"},{0x4C,"Numpad 5"},
-        {0x4D,"Numpad 6"},{0x47,"Numpad 7"},{0x48,"Numpad 8"},
-        {0x49,"Numpad 9"},{0x4E,"Numpad +"},{0x4A,"Numpad -"},
-        {0x37,"Numpad *"},{0xB5,"Numpad /"},
-    };
-    for (auto& p : kNames) if (p.first == dx) return p.second;
+    for (auto& p : s_dxKeyNames) if (p.first == dx) return p.second;
     char buf[8]; snprintf(buf, sizeof(buf), "0x%02X", dx);
     return buf;
 }
@@ -95,35 +95,10 @@ static std::string SettingsToJson()
 {
     std::string lp = JsonEscape(s_cfg.lastPage);
     std::string url = JsonEscape(s_cfg.url);
-    // Build key list JSON array for the UI dropdown
-    static const std::pair<int,const char*> kNames[] = {
-        {0x3B,"F1"},{0x3C,"F2"},{0x3D,"F3"},{0x3E,"F4"},
-        {0x3F,"F5"},{0x40,"F6"},{0x41,"F7"},{0x42,"F8"},
-        {0x43,"F9"},{0x44,"F10"},{0x57,"F11"},{0x58,"F12"},
-        {0x02,"1"},{0x03,"2"},{0x04,"3"},{0x05,"4"},{0x06,"5"},
-        {0x07,"6"},{0x08,"7"},{0x09,"8"},{0x0A,"9"},{0x0B,"0"},
-        {0x10,"Q"},{0x11,"W"},{0x12,"E"},{0x13,"R"},{0x14,"T"},
-        {0x15,"Y"},{0x16,"U"},{0x17,"I"},{0x18,"O"},{0x19,"P"},
-        {0x1E,"A"},{0x1F,"S"},{0x20,"D"},{0x21,"F"},{0x22,"G"},
-        {0x23,"H"},{0x24,"J"},{0x25,"K"},{0x26,"L"},
-        {0x2C,"Z"},{0x2D,"X"},{0x2E,"C"},{0x2F,"V"},{0x30,"B"},
-        {0x31,"N"},{0x32,"M"},
-        {0x29,"Tilde (~)"},{0x0C,"Minus (-)"},{0x0D,"Equals (=)"},
-        {0x1A,"["},{0x1B,"]"},{0x27,";"},{0x28,"'"},{0x56,"\\\\"},
-        {0x33,","},{0x34,"."},{0x35,"/"},
-        {0xC7,"Home"},{0xD2,"Insert"},{0xD3,"Delete"},
-        {0xC9,"Page Up"},{0xD1,"Page Down"},{0xC8,"Up"},{0xD0,"Down"},
-        {0xCB,"Left"},{0xCD,"Right"},
-        {0x52,"Numpad 0"},{0x4F,"Numpad 1"},{0x50,"Numpad 2"},
-        {0x51,"Numpad 3"},{0x4B,"Numpad 4"},{0x4C,"Numpad 5"},
-        {0x4D,"Numpad 6"},{0x47,"Numpad 7"},{0x48,"Numpad 8"},
-        {0x49,"Numpad 9"},{0x4E,"Numpad +"},{0x4A,"Numpad -"},
-        {0x37,"Numpad *"},{0xB5,"Numpad /"},
-    };
     std::string keys = "[";
-    for (auto& p : kNames) {
+    for (auto& p : s_dxKeyNames) {
         if (keys.size() > 1) keys += ',';
-        keys += "{\"code\":" + std::to_string(p.first) + ",\"name\":\"" + p.second + "\"}";
+        keys += "{\"code\":" + std::to_string(p.first) + ",\"name\":\"" + JsonEscape(p.second) + "\"}";
     }
     keys += "]";
     return std::string("{") +
