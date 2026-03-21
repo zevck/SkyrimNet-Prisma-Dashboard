@@ -23,8 +23,52 @@ static bool ResolveHost(const std::string& host, sockaddr_in& addr)
     }
     std::lock_guard<std::mutex> lk(s_dnsMtx);
     struct hostent* he = gethostbyname(host.c_str());
-    if (!he) return false;
+    if (!he) {
+        logger::warn("SkyrimNetDashboard: DNS resolution failed for '{}' (WSA={})", host, WSAGetLastError());
+        return false;
+    }
     addr.sin_addr.s_addr = *reinterpret_cast<u_long*>(he->h_addr_list[0]);
+    return true;
+}
+
+// Connect with a timeout (milliseconds).  Returns true on success.
+// Uses non-blocking connect + select so we don't hang forever if the
+// backend is unreachable (e.g. SkyrimNet not running → black window).
+static bool ConnectWithTimeout(SOCKET s, sockaddr_in& addr, int timeoutMs = 5000)
+{
+    u_long nonBlock = 1;
+    ioctlsocket(s, FIONBIO, &nonBlock);
+
+    int cr = connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (cr == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            fd_set wrSet, exSet;
+            FD_ZERO(&wrSet); FD_SET(s, &wrSet);
+            FD_ZERO(&exSet); FD_SET(s, &exSet);
+            timeval tv;
+            tv.tv_sec  = timeoutMs / 1000;
+            tv.tv_usec = (timeoutMs % 1000) * 1000;
+            int sel = select(0, nullptr, &wrSet, &exSet, &tv);
+            if (sel <= 0 || FD_ISSET(s, &exSet)) {
+                u_long block = 0; ioctlsocket(s, FIONBIO, &block);
+                logger::warn("SkyrimNetDashboard: connect timed out after {}ms (sel={}, WSA={})",
+                             timeoutMs, sel, WSAGetLastError());
+                return false;
+            }
+        } else {
+            u_long block = 0; ioctlsocket(s, FIONBIO, &block);
+            logger::warn("SkyrimNetDashboard: connect failed immediately (WSA={})", err);
+            return false;
+        }
+    }
+
+    u_long block = 0;
+    ioctlsocket(s, FIONBIO, &block);
+    // Set recv timeout so we don't block forever on a hung backend.
+    DWORD rcvTimeout = static_cast<DWORD>(timeoutMs * 2);
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&rcvTimeout), sizeof(rcvTimeout));
     return true;
 }
 
@@ -57,18 +101,22 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
               const std::string& reqBody)
 {
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET)
+    if (s == INVALID_SOCKET) {
+        logger::error("SkyrimNetDashboard: FetchResource socket() failed (WSA={})", WSAGetLastError());
         return {"", "text/plain", 503};
+    }
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(port);
     if (!ResolveHost(host, addr)) {
+        logger::error("SkyrimNetDashboard: FetchResource cannot resolve '{}' — is the hostname correct?", host);
         closesocket(s);
         return {"", "text/plain", 503};
     }
 
-    if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+    if (!ConnectWithTimeout(s, addr)) {
+        logger::error("SkyrimNetDashboard: FetchResource cannot connect to {}:{} — is SkyrimNet running?", host, port);
         closesocket(s);
         return {"", "text/plain", 503};
     }
@@ -97,7 +145,22 @@ FetchResource(const std::string& host, uint16_t port, const std::string& method,
     int n;
     while ((n = recv(s, buf, sizeof(buf), 0)) > 0)
         response.append(buf, n);
+    if (n == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        // WSAETIMEDOUT (10060) is expected when SO_RCVTIMEO fires on a hung backend.
+        if (err == WSAETIMEDOUT)
+            logger::warn("SkyrimNetDashboard: FetchResource recv timed out for {} {} (got {} bytes so far)",
+                         method, path, response.size());
+        else
+            logger::warn("SkyrimNetDashboard: FetchResource recv error for {} {} (WSA={}, {} bytes so far)",
+                         method, path, err, response.size());
+    }
     closesocket(s);
+
+    if (response.empty()) {
+        logger::warn("SkyrimNetDashboard: FetchResource got empty response for {} {}:{}{}", method, host, port, path);
+        return {"", "text/plain", 503};
+    }
 
     // Separate headers from body
     auto sep = response.find("\r\n\r\n");
@@ -200,6 +263,7 @@ static std::string InjectPatches(std::string body)
         Injections::GetAudioPolyfill() +
         Injections::GetDragSelect() +
         Injections::GetFileInputPolyfill() +
+        Injections::GetAutoscroll() +
         "</script>\n";
 
     std::string lower = body;
@@ -684,13 +748,48 @@ static std::string PatchBundle(std::string body)
 }
 
 // Fetches the SkyrimNet root HTML and injects compat patches.
+// Retries several times with a delay to tolerate startup race conditions
+// (SkyrimNet's HTTP server may not be listening yet when kDataLoaded fires).
 static std::string FetchAndInject(const std::string& host, uint16_t port)
 {
-    auto [body, ct, sc] = FetchResource(host, port, "GET", "/");
-    (void)sc;
-    if (body.empty())
-        return "<html><body>Proxy error: could not fetch dashboard from " +
-               host + ":" + std::to_string(port) + "</body></html>";
+    constexpr int    maxAttempts = 6;
+    constexpr int    retryDelayMs = 2000; // 2 s between attempts → up to ~10 s of waiting
+    std::string body, ct;
+    int sc = 0;
+
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+        logger::info("SkyrimNetDashboard: FetchAndInject attempt {}/{} → {}:{}",
+                     attempt, maxAttempts, host, port);
+        std::tie(body, ct, sc) = FetchResource(host, port, "GET", "/");
+        if (!body.empty()) {
+            logger::info("SkyrimNetDashboard: FetchAndInject got {} bytes (status {}, ct={})",
+                         body.size(), sc, ct);
+            break;
+        }
+        if (attempt < maxAttempts) {
+            logger::warn("SkyrimNetDashboard: FetchAndInject attempt {}/{} failed (status {}) "
+                         "— retrying in {} ms", attempt, maxAttempts, sc, retryDelayMs);
+            std::this_thread::sleep_for(std::chrono::milliseconds(retryDelayMs));
+        }
+    }
+
+    if (body.empty()) {
+        logger::error("SkyrimNetDashboard: FetchAndInject all {} attempts to {}:{} failed "
+                      "— showing error page", maxAttempts, host, port);
+        return "<html><head><style>"
+               "body{background:#111827;color:#e5e7eb;font-family:Consolas,'Courier New',monospace;"
+               "display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}"
+               ".box{background:#1f2937;border:1px solid #374151;border-radius:8px;padding:32px;max-width:480px}"
+               "h2{color:#f87171;margin:0 0 12px}p{margin:8px 0;color:#9ca3af;font-size:13px}"
+               "code{background:#374151;padding:2px 6px;border-radius:3px;color:#fbbf24}"
+               "</style></head><body><div class='box'>"
+               "<h2>Cannot reach SkyrimNet</h2>"
+               "<p>Could not connect to <code>" + host + ":" + std::to_string(port) + "</code></p>"
+               "<p>Make sure SkyrimNet is running before opening the dashboard.</p>"
+               "<p style='margin-top:16px;font-size:11px'>To change the URL, edit the <code>URL=</code> line in<br>"
+               "your <code>SkyrimNetPrismaDashboard.ini</code> file.</p>"
+               "</div></body></html>";
+    }
     return InjectPatches(std::move(body));
 }
 
@@ -739,16 +838,21 @@ static bool TryStreamProxy(SOCKET client,
                             const std::string& reqCT, const std::string& reqBody)
 {
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) return false;
+    if (s == INVALID_SOCKET) {
+        logger::warn("SkyrimNetDashboard: TryStreamProxy socket() failed (WSA={})", WSAGetLastError());
+        return false;
+    }
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(port);
     if (!ResolveHost(host, addr)) {
+        logger::warn("SkyrimNetDashboard: TryStreamProxy cannot resolve '{}'", host);
         closesocket(s);
         return false;
     }
-    if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+    if (!ConnectWithTimeout(s, addr)) {
+        logger::warn("SkyrimNetDashboard: TryStreamProxy cannot connect to {}:{}", host, port);
         closesocket(s); return false;
     }
 
@@ -781,14 +885,42 @@ static bool TryStreamProxy(SOCKET client,
     std::string alreadyRead   = headerBuf.substr(sepPos + 4);
 
     // If the upstream response carries a Content-Length, it is a normal
-    // bufferable response.  Hand off to FetchResource instead.
+    // bufferable response.  We MUST forward it here rather than returning
+    // false (which would cause FetchResource to re-send the request,
+    // double-firing any state-changing POST/PATCH — e.g. a toggle endpoint
+    // would flip twice and appear to do nothing).
     std::string hdrlower;
     hdrlower.reserve(headerSection.size());
     for (auto c : headerSection)
         hdrlower += static_cast<char>(tolower(static_cast<unsigned char>(c)));
     if (hdrlower.find("content-length:") != std::string::npos) {
+        // GET is idempotent — safe to re-send via FetchResource, which
+        // applies InjectPatches / PatchBundle / PatchCSS / asset caching.
+        if (method == "GET") {
+            closesocket(s);
+            return false;
+        }
+        // Non-GET (POST, etc.): forward the full response here so
+        // FetchResource never re-sends the state-changing request.
+        std::size_t clVal = 0;
+        auto clPos = hdrlower.find("content-length:");
+        if (clPos != std::string::npos) {
+            auto clEnd = headerSection.find("\r\n", clPos);
+            try { clVal = std::stoull(headerSection.substr(clPos + 15, clEnd - clPos - 15)); }
+            catch (...) {}
+        }
+        std::string respBody = alreadyRead;
+        while (respBody.size() < clVal) {
+            int n = recv(s, tmp, sizeof(tmp), 0);
+            if (n <= 0) break;
+            respBody.append(tmp, n);
+        }
         closesocket(s);
-        return false;
+        std::string fullResp = headerSection + "\r\n\r\n" + respBody;
+        send(client, fullResp.c_str(), static_cast<int>(fullResp.size()), 0);
+        logger::info("SkyrimNetDashboard: TryStreamProxy forwarded buffered {} {} ({} bytes)",
+                     method, path, respBody.size());
+        return true;
     }
 
     // No Content-Length → streaming response.
@@ -916,7 +1048,13 @@ done:
 static uint16_t StartShellServer(const std::string& shellHtml, const std::string& dashboardUrl)
 {
     WSADATA wsa{};
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+    int wsaErr = WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (wsaErr != 0) {
+        logger::critical("SkyrimNetDashboard: WSAStartup failed with error {}", wsaErr);
+        return 0;
+    }
+    logger::info("SkyrimNetDashboard: Winsock {}.{} initialised",
+                 LOBYTE(wsa.wVersion), HIBYTE(wsa.wVersion));
 
     SOCKET srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (srv == INVALID_SOCKET) {
@@ -957,6 +1095,7 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
             proxyHost = u.substr(0, sl);
         }
     }
+    logger::info("SkyrimNetDashboard: proxy target {}:{} (from '{}')", proxyHost, proxyPort, dashboardUrl);
 
     // Generate a per-session auth token so only our Ultralight browser
     // (which receives the token via Set-Cookie) can hit sensitive endpoints.
@@ -1685,11 +1824,13 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     // EXCLUDE bulk-clone and bulk-clone-cancel: those are REST
                     // API calls whose responses must be buffered as JSON to be
                     // consumed by response.json() in the UI.
-                    // EXCLUDE PUT/DELETE: never streaming, and TryStreamProxy
+                    // EXCLUDE PUT/PATCH/DELETE: never streaming, and TryStreamProxy
                     // sends the request then discards it if response has
                     // Content-Length, causing a double-send via FetchResource.
+                    // (PATCH was the cause of the custom-actions disable toggle
+                    // bug — two PATCHes toggled enabled→disabled→enabled.)
                     const bool isBulkClone = path.find("bulk-clone") != std::string::npos;
-                    const bool skipStream  = isBulkClone || method == "PUT" || method == "DELETE";
+                    const bool skipStream  = isBulkClone || method == "PUT" || method == "PATCH" || method == "DELETE";
                     if (!skipStream &&
                         TryStreamProxy(client, proxyHost, proxyPort, method, path, reqCT, reqBody)) {
                         closesocket(client);

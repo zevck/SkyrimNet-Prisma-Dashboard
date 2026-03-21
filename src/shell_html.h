@@ -34,7 +34,7 @@ iframe{width:100%;height:100%;border:none;display:block}
 .rh{position:absolute;z-index:200}
 .rh[data-r=n]{top:-5px;left:12px;right:12px;height:6px;cursor:n-resize}
 .rh[data-r=s]{bottom:-5px;left:12px;right:12px;height:10px;cursor:s-resize}
-.rh[data-r=e]{right:-5px;top:12px;bottom:12px;width:10px;cursor:e-resize}
+.rh[data-r=e]{right:-8px;top:12px;bottom:12px;width:8px;cursor:e-resize}
 .rh[data-r=w]{left:-5px;top:12px;bottom:12px;width:10px;cursor:w-resize}
 .rh[data-r=nw]{top:-5px;left:-5px;width:10px;height:10px;cursor:nw-resize}
 .rh[data-r=ne]{top:-5px;right:-5px;width:10px;height:10px;cursor:ne-resize}
