@@ -63,6 +63,7 @@ var _active=null;
 var _syncing=false;
 var _keyActive=false;
 var _idleT=0;var _curVis=false;
+var _buf='';var _cpos=0;
 var _curEl=document.createElement('div');
 _curEl.id='_snpd_cur';
 
@@ -82,31 +83,38 @@ return (cv&&cv.view&&cv.view.dispatch)?cv.view:self._snpdView;}
 function _readDOM(editor){
 var ct=editor.querySelector('.cm-content');
 if(!ct)return '';
-var nodes=ct.childNodes;
-if(!nodes.length)return '';
 var parts=[];
-for(var i=0;i<nodes.length;i++){
-var nd=nodes[i];
-if(nd.nodeType===1)parts.push(nd.textContent);
-else if(nd.nodeType===3&&nd.textContent){
-if(parts.length>0)parts[parts.length-1]+=nd.textContent;
-else parts.push(nd.textContent);}}
+for(var i=0;i<ct.childNodes.length;i++){
+var nd=ct.childNodes[i];
+// Only read .cm-line elements — skip .cm-gap spacers and other CM6 internals
+// that represent non-rendered virtualized content.
+if(nd.nodeType===1&&nd.classList&&nd.classList.contains('cm-line'))
+parts.push(nd.textContent);}
+if(!parts.length)return '';
 return parts.join(String.fromCharCode(10)).replace(/\u00A0/g,' ');}
 
 function _syncToCM6(editor){
 var v=_getView(editor);
 if(!v)return;
-var domText=_readDOM(editor);
 var cmText=v.state.doc.toString();
-if(domText===cmText)return;
+if(_buf===cmText)return;
 _syncing=true;
-v.dispatch({changes:{from:0,to:cmText.length,insert:domText}});
+v.dispatch({
+changes:{from:0,to:cmText.length,insert:_buf},
+selection:{anchor:Math.min(_cpos,_buf.length)}});
 setTimeout(function(){_syncing=false;},0);}
 
 function _activate(editor){
 if(_active===editor)return;
 if(_active)_deactivate();
 _active=editor;
+// Snapshot the full document and cursor from CM6.
+// The buffer IS the document — no DOM reading needed for sync.
+var v=_getView(editor);
+if(v){
+_buf=v.state.doc.toString();
+_cpos=v.state.selection.main.head;
+} else {_buf='';_cpos=0;}
 editor.classList.add('cm-editing');}
 
 function _deactivate(){
@@ -115,7 +123,6 @@ var editor=_active;
 _active=null;
 if(_idleT){clearTimeout(_idleT);_idleT=0;}
 if(_curVis){_curEl.style.display='none';_curVis=false;}
-console.log('[snpd] _deactivate: syncing to CM6');
 _syncToCM6(editor);
 // Flush app's onChange immediately so React state is current
 // before any Save handler reads it. Clear debounce timer AFTER
@@ -131,7 +138,7 @@ clearTimeout(self._snpdCmTmr);
 editor.classList.remove('cm-editing');}
 
 // Block keydown — native contenteditable handles chars/backspace/delete.
-// Enter: execCommand since native may not handle it in CM6's DOM.
+// We also mirror each change into _buf so sync never needs to read the DOM.
 document.addEventListener('keydown',function(e){
 if(!e.isTrusted)return;
 if(e.ctrlKey||e.metaKey)return;
@@ -143,9 +150,24 @@ _activate(editor);
 _keyActive=true;
 if(_idleT){clearTimeout(_idleT);_idleT=0;}
 if(_curVis){_curEl.style.display='none';_curVis=false;}
+// Mirror the edit into our buffer.
 if(k==='Enter'){
+_buf=_buf.substring(0,_cpos)+'\n'+_buf.substring(_cpos);_cpos++;
 document.execCommand('insertParagraph',false,null);
-e.preventDefault();}
+e.preventDefault();
+} else if(k==='Backspace'){
+if(_cpos>0){_buf=_buf.substring(0,_cpos-1)+_buf.substring(_cpos);_cpos--;}
+} else if(k==='Delete'){
+if(_cpos<_buf.length){_buf=_buf.substring(0,_cpos)+_buf.substring(_cpos+1);}
+} else if(k.length===1){
+_buf=_buf.substring(0,_cpos)+k+_buf.substring(_cpos);_cpos++;
+} else if(k==='ArrowLeft'){_cpos=Math.max(0,_cpos-1);
+} else if(k==='ArrowRight'){_cpos=Math.min(_buf.length,_cpos+1);
+} else if(k==='Home'){
+var ln=_buf.lastIndexOf('\n',_cpos-1);_cpos=ln<0?0:ln+1;
+} else if(k==='End'){
+var nl=_buf.indexOf('\n',_cpos);_cpos=nl<0?_buf.length:nl;
+}
 e.stopImmediatePropagation();
 },true);
 
@@ -191,6 +213,13 @@ if(_active)e.stopImmediatePropagation();
 document.addEventListener('mousedown',function(e){
 if(!_active)return;
 _deactivate();
+},true);
+
+// On scroll: deactivate (syncs edits to CM6) so CM6's re-virtualization
+// sees the updated text.  Next keystroke will reactivate bypass mode.
+document.addEventListener('wheel',function(e){
+if(!_active)return;
+if(_inCmEditor(e.target))_deactivate();
 },true);
 
 // Deactivate on focusout — fires BEFORE click in DOM event order,

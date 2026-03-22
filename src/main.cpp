@@ -231,9 +231,7 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
 
     // 4. Build the chrome shell page and start the local HTTP server
     std::string shellHtml = BuildShellHtml();
-    std::string startUrl  = (s_cfg.defaultHome || s_cfg.lastPage.empty())
-                            ? s_cfg.url : s_cfg.lastPage;
-    uint16_t    port      = StartShellServer(shellHtml, startUrl);
+    uint16_t    port      = StartShellServer(shellHtml, s_cfg.url);
     if (port == 0) {
         logger::critical("SkyrimNetDashboard: Failed to start shell server.");
         return;
@@ -250,7 +248,7 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     // Close button in the HTML calls window.closeDashboard('') — wire it to OnToggle
     s_PrismaUI->RegisterJSListener(s_View, "closeDashboard", [](const char*) { OnToggle(); });
 
-    logger::info("SkyrimNetDashboard: Shell view created at {} (iframe -> {})", shellUrl, startUrl);
+    logger::info("SkyrimNetDashboard: Shell view created at {} (iframe -> {})", shellUrl, s_cfg.url);
 
     // 6. Register hotkey to toggle the overlay
     s_toggleKey.store(static_cast<uint32_t>(s_cfg.hotKey));

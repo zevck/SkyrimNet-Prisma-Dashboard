@@ -3,7 +3,6 @@ setup.ps1
 SKSE/Plugins/SkyrimNetPrismaDashboard.dll
 external/CommonLibSSE-NG/
 build/dobuild.bat
-.resources/PrismaUI-SkyrimNet-Plugin/
 NAVIGATION_FLASH_RESEARCH.md
 SkyrimNet Prisma Dashboard.code-workspace
 /build
@@ -13,3 +12,4 @@ SKSE/Plugins/SkyrimNetPrismaDashboard.ini
 images/SkyrimNetPrismaDashboard.ini
 *.zip
 .claude/settings.local.json
+/.resources

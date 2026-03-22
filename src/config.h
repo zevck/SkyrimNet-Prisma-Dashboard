@@ -50,10 +50,9 @@ static void ParseHostPort(const std::string& url, std::string& host, uint16_t& p
 struct DashboardSettings {
     // [Dashboard]
     std::string url          = "http://localhost:8080/";
-    std::string lastPage     = "";
     int         hotKey       = 0x3E;  // DX scancode — default F4
     bool        keepBg       = false; // keep page alive when closed
-    bool        defaultHome  = false; // always open base URL instead of lastPage
+    bool        defaultHome  = false;
     bool        pauseGame    = false; // pause while focused
     // Window layout (persisted across game sessions)
     std::string winX     = "";  // CSS left value, e.g. "423px"
@@ -131,7 +130,6 @@ static std::string DxKeyName(int dx)
 // Build JSON for current settings (for /settings-get)
 static std::string SettingsToJson()
 {
-    std::string lp = JsonEscape(s_cfg.lastPage);
     std::string url = JsonEscape(s_cfg.url);
     std::string keys = "[";
     for (auto& p : s_dxKeyNames) {
@@ -211,9 +209,6 @@ static void WriteIniFile()
         << "; If it doesn't, replace with your local IP, e.g. http://192.168.1.100:8080/\n"
         << "URL=" << s_cfg.url << "\n"
         << "\n"
-        << "; Last visited page - updated automatically, do not edit manually.\n"
-        << "LastPage=" << s_cfg.lastPage << "\n"
-        << "\n"
         << "; Keep the menu rendered without focus (1 = yes, 0 = no).\n"
         << "KeepBackground=" << (s_cfg.keepBg ? 1 : 0) << "\n"
         << "\n"
@@ -274,7 +269,6 @@ static void LoadSettings()
     };
 
     s_cfg.url         = str("URL",          "http://localhost:8080/");
-    s_cfg.lastPage    = str("LastPage",     s_cfg.url.c_str());
     s_cfg.hotKey      = num("HotKey",       0x3E);
     s_cfg.keepBg      = num("KeepBackground", 0) != 0;
     s_cfg.defaultHome = num("DefaultHome",  0) != 0;
