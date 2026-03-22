@@ -9,7 +9,7 @@ inline std::string GetEditorFixes()
 {
     return R"EDITOR(
 <style>
-/* ── Editor selection + key-repeat fixes ────────────────────────── */
+/* ── Editor selection fixes ──────────────────────────────────── */
 /* Force text selection on in CM6's contenteditable.
    Ultralight defaults contenteditable to user-select:none which
    breaks drag-to-select entirely. */
@@ -21,8 +21,8 @@ cursor:text!important;}
 input,textarea,[contenteditable]{
 -webkit-user-select:text!important;user-select:text!important;}
 
-/*Make CM6's custom selection-background divs visible even if the
-  engine doesn't render ::selection pseudo-elements. */
+/* Make CM6's custom selection-background divs visible even if the
+   engine doesn't render ::selection pseudo-elements. */
 .cm-selectionBackground{
 background:#3b82f6!important;opacity:0.35!important;
 pointer-events:none!important;}
@@ -44,208 +44,34 @@ color:#000000!important;}
 .cm-cursor,.cm-cursorLayer{
 animation:none!important;-webkit-animation:none!important;
 opacity:1!important;}
-
-/* ── Native caret while CM6 is bypassed ──────────────────────────── */
-.cm-editing .cm-cursorLayer{display:none!important;}
-.cm-editing .cm-content{caret-color:transparent!important;}
-.cm-editing .cm-selectionLayer{display:none!important;}
-#_snpd_cur{position:fixed;width:1.5px;background:#e5e7eb;
-pointer-events:none;z-index:9999;display:none;}
 </style>
 <script>
-// CM6 full bypass: block all 5 CM6 input paths while editing.
-// Native contenteditable handles chars/backspace/delete.
-// Enter is handled via execCommand. Sync to CM6 on mouse click
-// (so selection maps correctly) and on focusout.
+// ── CM6 MutationObserver throttle ────────────────────────────────────
+// CM6 processes every DOM mutation synchronously (observe → reconcile →
+// re-render).  In Ultralight this is expensive enough to cause frame
+// drops during fast typing.  We batch CM6's MO callbacks to once per
+// animation frame — multiple keystrokes within one frame get processed
+// as a single update instead of individually.
 (function(){
 var _OrigMO=window.MutationObserver;
-var _active=null;
-var _syncing=false;
-var _keyActive=false;
-var _idleT=0;var _curVis=false;
-var _buf='';var _cpos=0;
-var _curEl=document.createElement('div');
-_curEl.id='_snpd_cur';
-
-function _inCmEditor(el){
-var p=el;
-while(p){
-if(p.nodeType===1&&p.classList&&p.classList.contains('cm-editor'))return p;
-p=p.parentElement;}
-return null;}
-
-function _getView(editor){
-var ct=editor.querySelector('.cm-content');
-if(!ct)return null;
-var cv=ct.cmView;
-return (cv&&cv.view&&cv.view.dispatch)?cv.view:self._snpdView;}
-
-function _readDOM(editor){
-var ct=editor.querySelector('.cm-content');
-if(!ct)return '';
-var parts=[];
-for(var i=0;i<ct.childNodes.length;i++){
-var nd=ct.childNodes[i];
-// Only read .cm-line elements — skip .cm-gap spacers and other CM6 internals
-// that represent non-rendered virtualized content.
-if(nd.nodeType===1&&nd.classList&&nd.classList.contains('cm-line'))
-parts.push(nd.textContent);}
-if(!parts.length)return '';
-return parts.join(String.fromCharCode(10)).replace(/\u00A0/g,' ');}
-
-function _syncToCM6(editor){
-var v=_getView(editor);
-if(!v)return;
-var cmText=v.state.doc.toString();
-if(_buf===cmText)return;
-_syncing=true;
-v.dispatch({
-changes:{from:0,to:cmText.length,insert:_buf},
-selection:{anchor:Math.min(_cpos,_buf.length)}});
-setTimeout(function(){_syncing=false;},0);}
-
-function _activate(editor){
-if(_active===editor)return;
-if(_active)_deactivate();
-_active=editor;
-// Snapshot the full document and cursor from CM6.
-// The buffer IS the document — no DOM reading needed for sync.
-var v=_getView(editor);
-if(v){
-_buf=v.state.doc.toString();
-_cpos=v.state.selection.main.head;
-} else {_buf='';_cpos=0;}
-editor.classList.add('cm-editing');}
-
-function _deactivate(){
-if(!_active)return;
-var editor=_active;
-_active=null;
-if(_idleT){clearTimeout(_idleT);_idleT=0;}
-if(_curVis){_curEl.style.display='none';_curVis=false;}
-_syncToCM6(editor);
-// Flush app's onChange immediately so React state is current
-// before any Save handler reads it. Clear debounce timer AFTER
-// _syncToCM6 because dispatch triggers updateListener which
-// sets a new 1500ms timer — we must cancel that too.
-if(self._snpdCmCb){clearTimeout(self._snpdCmTmr);
-try{var v=_getView(editor);
-if(v){var txt=v.state.doc.toString();
-console.log('[snpd] _deactivate: calling _snpdCmCb, text length='+txt.length);
-self._snpdCmCb(txt);}}catch(_e){
-console.error('[snpd] _deactivate: _snpdCmCb threw',_e);}}
-clearTimeout(self._snpdCmTmr);
-editor.classList.remove('cm-editing');}
-
-// Block keydown — native contenteditable handles chars/backspace/delete.
-// We also mirror each change into _buf so sync never needs to read the DOM.
-document.addEventListener('keydown',function(e){
-if(!e.isTrusted)return;
-if(e.ctrlKey||e.metaKey)return;
-var k=e.key;
-if(k==='Escape')return;
-var editor=_inCmEditor(e.target);
-if(!editor)return;
-_activate(editor);
-_keyActive=true;
-if(_idleT){clearTimeout(_idleT);_idleT=0;}
-if(_curVis){_curEl.style.display='none';_curVis=false;}
-// Mirror the edit into our buffer.
-if(k==='Enter'){
-_buf=_buf.substring(0,_cpos)+'\n'+_buf.substring(_cpos);_cpos++;
-document.execCommand('insertParagraph',false,null);
-e.preventDefault();
-} else if(k==='Backspace'){
-if(_cpos>0){_buf=_buf.substring(0,_cpos-1)+_buf.substring(_cpos);_cpos--;}
-} else if(k==='Delete'){
-if(_cpos<_buf.length){_buf=_buf.substring(0,_cpos)+_buf.substring(_cpos+1);}
-} else if(k.length===1){
-_buf=_buf.substring(0,_cpos)+k+_buf.substring(_cpos);_cpos++;
-} else if(k==='ArrowLeft'){_cpos=Math.max(0,_cpos-1);
-} else if(k==='ArrowRight'){_cpos=Math.min(_buf.length,_cpos+1);
-} else if(k==='Home'){
-var ln=_buf.lastIndexOf('\n',_cpos-1);_cpos=ln<0?0:ln+1;
-} else if(k==='End'){
-var nl=_buf.indexOf('\n',_cpos);_cpos=nl<0?_buf.length:nl;
-}
-e.stopImmediatePropagation();
-},true);
-
-document.addEventListener('keyup',function(){
-_keyActive=false;
-if(_active){var ed=_active;
-if(_idleT)clearTimeout(_idleT);
-_idleT=setTimeout(function(){_idleT=0;
-if(_active!==ed)return;
-if(!document.body.contains(_curEl))document.body.appendChild(_curEl);
-requestAnimationFrame(function(){
-var s=window.getSelection();
-if(!s||!s.rangeCount||!s.isCollapsed)return;
-var r=s.getRangeAt(0).getBoundingClientRect();
-if(r.height<2){var n=s.focusNode;
-if(n&&n.nodeType===3)n=n.parentElement;
-if(n)r=n.getBoundingClientRect();}
-if(r.height<2)return;
-_curEl.style.cssText='position:fixed;width:1px;background:#3b82f6;'+
-'pointer-events:none;z-index:9999;left:'+r.left+'px;top:'+r.top+
-'px;height:'+r.height+'px;display:block;';
-_curVis=true;});},100);}
-},true);
-
-// Block beforeinput/input from CM6
-document.addEventListener('beforeinput',function(e){
-if(!_active)return;
-if(_inCmEditor(e.target))e.stopImmediatePropagation();
-},true);
-
-document.addEventListener('input',function(e){
-if(!_active)return;
-if(_inCmEditor(e.target))e.stopImmediatePropagation();
-},true);
-
-// Block selectionchange always while active — CM6 maps selection
-// against its stale doc state and jumps the cursor.
-document.addEventListener('selectionchange',function(e){
-if(_active)e.stopImmediatePropagation();
-},true);
-
-// On click: deactivate so CM6 handles cursor positioning.
-document.addEventListener('mousedown',function(e){
-if(!_active)return;
-_deactivate();
-},true);
-
-// On scroll: deactivate (syncs edits to CM6) so CM6's re-virtualization
-// sees the updated text.  Next keystroke will reactivate bypass mode.
-document.addEventListener('wheel',function(e){
-if(!_active)return;
-if(_inCmEditor(e.target))_deactivate();
-},true);
-
-// Deactivate on focusout — fires BEFORE click in DOM event order,
-// so CM6 state is synced before any Save handler reads it.
-// Use relatedTarget (sync) instead of setTimeout+activeElement (async).
-document.addEventListener('focusout',function(e){
-if(!_active)return;
-var editor=_active;
-var related=e.relatedTarget;
-if(related&&editor.contains(related))return;
-_deactivate();
-},true);
-
-// MO wrapper: suppress CM6 MO while active or syncing
 window.MutationObserver=function(callback){
 var _isCM=false;
-var _obs;
-var _wrappedCb=function(mutations,observer){
-if(!_isCM){callback(mutations,observer);return;}
-if(!_active&&!_syncing)callback(mutations,observer);};
-_obs=new _OrigMO(_wrappedCb);
+var _pending=[];
+var _rafId=0;
+var _wrappedCb=function(mutations){
+if(!_isCM){callback(mutations);return;}
+for(var i=0;i<mutations.length;i++)_pending.push(mutations[i]);
+if(!_rafId){_rafId=requestAnimationFrame(function(){
+_rafId=0;
+var batch=_pending;_pending=[];
+if(batch.length)callback(batch);});}};
+var _obs=new _OrigMO(_wrappedCb);
 var _origTR=_obs.takeRecords.bind(_obs);
 _obs.takeRecords=function(){
 var real=_origTR();
-if(!_isCM||(!_active&&!_syncing))return real;
-return [];};
+if(!_isCM)return real;
+var ours=_pending.splice(0,_pending.length);
+return ours.concat(real);};
 var _origObs=_obs.observe.bind(_obs);
 _obs.observe=function(target,options){
 if(!_isCM){var p=target;
@@ -255,6 +81,21 @@ return _origObs(target,options);};
 _obs.disconnect=_obs.disconnect.bind(_obs);
 return _obs;};
 window.MutationObserver.prototype=_OrigMO.prototype;
+})();
+
+// ── CM6 input throttle ───────────────────────────────────────────────
+// Block CM6's synchronous beforeinput/input handlers.  Contenteditable
+// handles the input natively (fast).  The throttled MO above detects the
+// DOM change and reconciles CM6's state once per animation frame.
+(function(){
+function _inCm(el){
+var p=el;while(p){
+if(p.nodeType===1&&p.classList&&p.classList.contains('cm-editor'))return true;
+p=p.parentElement;}return false;}
+document.addEventListener('beforeinput',function(e){
+if(_inCm(e.target))e.stopImmediatePropagation();},true);
+document.addEventListener('input',function(e){
+if(_inCm(e.target))e.stopImmediatePropagation();},true);
 })();
 
 // ── CM6 drag-selection relay ──────────────────────────────────────────
@@ -298,19 +139,11 @@ document.addEventListener('pointerup',_clear,true);
 document.addEventListener('pointercancel',_clear,true);
 function _onDragMove(e){
 if(!_dragCm||!_dragDown)return;
-// One-shot 4px threshold — only gates the very first movement so that
-// a stationary click doesn't fire. Once exceeded, _dragStarted=true and
-// all subsequent moves (including back toward the start) fire normally.
 if(!_dragStarted){
 var dx=e.clientX-_dragStartX,dy=e.clientY-_dragStartY;
 if(dx*dx+dy*dy<16)return;
 _dragStarted=true;}
 var n=Date.now();if(n-_lastDragMs<16)return;_lastDragMs=n;
-// Reach the EditorView via _dragCm.cmView.
-// _dragCm = .cm-content = view.contentDOM in CM6.
-// CM6 sets contentDOM.cmView = DocView; DocView.view = EditorView.
-// Property names are never mangled by terser so posAtCoords/dispatch work.
-// Fall back to self._snpdView (set by the bundle patch on each doc change).
 var cv=_dragCm.cmView;
 var view=(cv&&cv.view&&cv.view.posAtCoords)?cv.view
 :((cv&&cv.posAtCoords)?cv:self._snpdView);
@@ -357,9 +190,6 @@ var dx=e.clientX-_iSX,dy=e.clientY-_iSY;
 if(dx*dx+dy*dy<16)return;
 _iStarted=true;}
 var n=Date.now();if(n-_iLast<16)return;_iLast=n;
-// Canvas-based char-position measurement — accurate for proportional fonts,
-// padded inputs, and horizontally scrolled fields.  caretRangeFromPoint is
-// not used here because it cannot reach inside form-control shadow DOM.
 var t=_iEl;
 if(!_iCvs)_iCvs=document.createElement('canvas');
 var pos=-1;
