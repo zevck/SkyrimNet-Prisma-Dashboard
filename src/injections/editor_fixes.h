@@ -44,6 +44,7 @@ color:#000000!important;}
 .cm-cursor,.cm-cursorLayer{
 animation:none!important;-webkit-animation:none!important;
 opacity:1!important;}
+
 </style>
 <script>
 // ── CM6 MutationObserver throttle ────────────────────────────────────
@@ -52,14 +53,36 @@ opacity:1!important;}
 // drops during fast typing.  We batch CM6's MO callbacks to once per
 // animation frame — multiple keystrokes within one frame get processed
 // as a single update instead of individually.
+// ── CM6 MO throttle + input blocking ─────────────────────────────────
+// CM6's MO reconciliation is expensive in Ultralight.  We batch MO
+// callbacks to once per rAF during typing.  Programmatic changes (like
+// switching prompts) pass through immediately so content updates instantly.
+// beforeinput/input are blocked so CM6 doesn't process them synchronously.
 (function(){
 var _OrigMO=window.MutationObserver;
+var _typing=false,_typingT=0;
+
+function _inCm(el){
+var p=el;while(p){
+if(p.nodeType===1&&p.classList&&p.classList.contains('cm-editor'))return true;
+p=p.parentElement;}return false;}
+
+// Track typing state — only throttle MO during active typing.
+document.addEventListener('keydown',function(e){
+if(!e.isTrusted||!_inCm(e.target))return;
+_typing=true;clearTimeout(_typingT);
+_typingT=setTimeout(function(){_typing=false;},150);
+},true);
+
 window.MutationObserver=function(callback){
 var _isCM=false;
 var _pending=[];
 var _rafId=0;
 var _wrappedCb=function(mutations){
 if(!_isCM){callback(mutations);return;}
+if(!_typing){
+// Not typing — pass through immediately (prompt switch, etc.)
+callback(mutations);return;}
 for(var i=0;i<mutations.length;i++)_pending.push(mutations[i]);
 if(!_rafId){_rafId=requestAnimationFrame(function(){
 _rafId=0;
@@ -81,17 +104,7 @@ return _origObs(target,options);};
 _obs.disconnect=_obs.disconnect.bind(_obs);
 return _obs;};
 window.MutationObserver.prototype=_OrigMO.prototype;
-})();
 
-// ── CM6 input throttle ───────────────────────────────────────────────
-// Block CM6's synchronous beforeinput/input handlers.  Contenteditable
-// handles the input natively (fast).  The throttled MO above detects the
-// DOM change and reconciles CM6's state once per animation frame.
-(function(){
-function _inCm(el){
-var p=el;while(p){
-if(p.nodeType===1&&p.classList&&p.classList.contains('cm-editor'))return true;
-p=p.parentElement;}return false;}
 document.addEventListener('beforeinput',function(e){
 if(_inCm(e.target))e.stopImmediatePropagation();},true);
 document.addEventListener('input',function(e){
