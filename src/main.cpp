@@ -223,18 +223,9 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
 
     // 3. Parse the SkyrimNet server address for the audio subsystem
     {
-        std::string u = s_cfg.url;
-        if (u.size() > 7 && u.substr(0, 7) == "http://") u = u.substr(7);
-        auto col = u.find(':');
-        auto sl  = u.find('/');
-        if (col != std::string::npos && (sl == std::string::npos || col < sl)) {
-            s_audioHost = u.substr(0, col);
-            try { s_audioPort = static_cast<uint16_t>(std::stoi(u.substr(col + 1, sl - col - 1))); }
-            catch (...) {}
-        } else {
-            s_audioHost = u.substr(0, sl);
-            s_audioPort = 80;
-        }
+        s_audioHost = "localhost";
+        s_audioPort = 8080;
+        ParseHostPort(s_cfg.url, s_audioHost, s_audioPort);
         logger::info("SkyrimNetDashboard: audio backend {}:{}", s_audioHost, s_audioPort);
     }
 

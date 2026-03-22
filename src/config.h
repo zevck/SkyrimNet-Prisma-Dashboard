@@ -4,6 +4,44 @@
 #define PLUGIN_NAME    "SkyrimNetPrismaDashboard"
 #define PLUGIN_VERSION "1.0.0"
 
+// Parse host and port from a URL string (after scheme is stripped).
+// Handles IPv6 bracket notation: "[::1]:8080/path" → host="::1", port=8080
+// Also handles plain: "localhost:8080/path" → host="localhost", port=8080
+static void ParseHostPort(const std::string& url, std::string& host, uint16_t& port)
+{
+    std::string u = url;
+    // Strip http:// or https:// scheme (case-insensitive)
+    {
+        std::string lower;
+        lower.reserve(u.size());
+        for (auto c : u) lower += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        if (lower.size() >= 8 && lower.substr(0, 8) == "https://") u = u.substr(8);
+        else if (lower.size() >= 7 && lower.substr(0, 7) == "http://") u = u.substr(7);
+    }
+
+    if (!u.empty() && u[0] == '[') {
+        // IPv6 bracket notation: [::1]:port/path
+        auto closeBracket = u.find(']');
+        if (closeBracket != std::string::npos) {
+            host = u.substr(1, closeBracket - 1); // strip brackets
+            auto rest = u.substr(closeBracket + 1);
+            if (!rest.empty() && rest[0] == ':') {
+                try { port = static_cast<uint16_t>(std::stoi(rest.substr(1))); } catch (...) {}
+            }
+        }
+    } else {
+        // IPv4 / hostname: host:port/path
+        auto sl  = u.find('/');
+        auto col = u.find(':');
+        if (col != std::string::npos && (sl == std::string::npos || col < sl)) {
+            host = u.substr(0, col);
+            try { port = static_cast<uint16_t>(std::stoi(u.substr(col + 1, sl != std::string::npos ? sl - col - 1 : std::string::npos))); } catch (...) {}
+        } else {
+            host = u.substr(0, sl);
+        }
+    }
+}
+
 // ── INI settings ─────────────────────────────────────────────────────────────
 // Loaded once at startup from SKSE/Plugins/SkyrimNetPrismaDashboard.ini.
 // All mutable settings are stored here and flushed back to the INI via
@@ -114,10 +152,95 @@ static std::string SettingsToJson()
 
 static void SaveSettings();
 
+// ── Manual INI reader/writer ────────────────────────────────────────────────
+// Replaces GetPrivateProfileStringA / WritePrivateProfileStringA which corrupt
+// URLs containing "://" on certain Windows 11 builds.
+
+// Read all key=value pairs from the [Dashboard] section into a map.
+static std::unordered_map<std::string, std::string> ReadIniSection()
+{
+    std::unordered_map<std::string, std::string> kv;
+    std::ifstream in(s_iniPath);
+    if (!in.is_open()) return kv;
+
+    bool inSection = false;
+    std::string line;
+    while (std::getline(in, line)) {
+        // Trim trailing \r (handles both \r\n and \n)
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Trim leading whitespace
+        auto start = line.find_first_not_of(" \t");
+        if (start == std::string::npos) continue;
+        line = line.substr(start);
+
+        if (line[0] == '[') {
+            inSection = (line.find("[Dashboard]") == 0);
+            continue;
+        }
+        if (!inSection || line[0] == ';' || line[0] == '#') continue;
+
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+
+        std::string key = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+        // Trim whitespace from key and value
+        auto kEnd = key.find_last_not_of(" \t");
+        if (kEnd != std::string::npos) key = key.substr(0, kEnd + 1);
+        auto vStart = val.find_first_not_of(" \t");
+        if (vStart != std::string::npos) val = val.substr(vStart);
+        auto vEnd = val.find_last_not_of(" \t");
+        if (vEnd != std::string::npos) val = val.substr(0, vEnd + 1);
+
+        kv[key] = val;
+    }
+    return kv;
+}
+
+// Write the INI file from scratch, preserving comment structure.
+static void WriteIniFile()
+{
+    std::ofstream out(s_iniPath);
+    if (!out.is_open()) {
+        logger::warn("SkyrimNetDashboard: failed to write INI at '{}'", s_iniPath);
+        return;
+    }
+    out << "[Dashboard]\n"
+        << "; Full URL to your SkyrimNet instance, including port.\n"
+        << "; Default http://localhost:8080/ works for most setups.\n"
+        << "; If it doesn't, replace with your local IP, e.g. http://192.168.1.100:8080/\n"
+        << "URL=" << s_cfg.url << "\n"
+        << "\n"
+        << "; Last visited page - updated automatically, do not edit manually.\n"
+        << "LastPage=" << s_cfg.lastPage << "\n"
+        << "\n"
+        << "; Keep the menu rendered without focus (1 = yes, 0 = no).\n"
+        << "KeepBackground=" << (s_cfg.keepBg ? 1 : 0) << "\n"
+        << "\n"
+        << "; Always open the base URL instead of resuming the last visited page (1 = yes, 0 = no).\n"
+        << "DefaultHome=" << (s_cfg.defaultHome ? 1 : 0) << "\n"
+        << "\n"
+        << "; Pause Skyrim while the dashboard is focused (1 = yes, 0 = no).\n"
+        << "PauseGame=" << (s_cfg.pauseGame ? 1 : 0) << "\n"
+        << "\n"
+        << "; Hotkey to open/close the dashboard (DirectInput scan code, decimal).\n"
+        << "; Default 62 = F4. Common keys: 59=F1, 60=F2, 61=F3, 62=F4, 63=F5,\n"
+        << "; 64=F6, 65=F7, 66=F8, 67=F9, 68=F10, 87=F11, 88=F12.\n"
+        << "HotKey=" << s_cfg.hotKey << "\n"
+        << "\n"
+        << "; Internal version marker - do not edit.\n"
+        << "Version=2\n"
+        << "WinX=" << s_cfg.winX << "\n"
+        << "WinY=" << s_cfg.winY << "\n"
+        << "WinW=" << s_cfg.winW << "\n"
+        << "WinH=" << s_cfg.winH << "\n"
+        << "WinZoom=" << s_cfg.winZoom << "\n"
+        << "WinFs=" << (s_cfg.winFs ? 1 : 0) << "\n";
+}
+
 static void LoadSettings()
 {
-    // Locate the INI next to the DLL: <SKSE log dir>/../../Plugins/...ini
-    // The most reliable path is from the module filename itself.
+    // Locate the INI next to the DLL
     {
         char modPath[MAX_PATH] = {};
         HMODULE hm = nullptr;
@@ -125,102 +248,57 @@ static void LoadSettings()
                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            reinterpret_cast<LPCSTR>(&LoadSettings), &hm);
         GetModuleFileNameA(hm, modPath, MAX_PATH);
-        // Replace .dll extension with .ini
         std::string mp(modPath);
         auto dot = mp.rfind('.');
         s_iniPath = (dot != std::string::npos ? mp.substr(0, dot) : mp) + ".ini";
     }
 
-    auto readStr = [&](const char* key, const char* def) -> std::string {
-        char buf[512] = {};
-        GetPrivateProfileStringA("Dashboard", key, def, buf, sizeof(buf), s_iniPath.c_str());
-        return buf;
+    // Auto-generate INI with defaults if it doesn't exist
+    if (GetFileAttributesA(s_iniPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // Set defaults so WriteIniFile has something to write
+        s_cfg = DashboardSettings{};
+        WriteIniFile();
+        logger::info("SkyrimNetDashboard: INI auto-generated with defaults");
+    }
+
+    // Read all values
+    auto kv = ReadIniSection();
+    auto str = [&](const char* key, const char* def) -> std::string {
+        auto it = kv.find(key);
+        return (it != kv.end() && !it->second.empty()) ? it->second : def;
     };
-    auto readInt = [&](const char* key, int def) -> int {
-        return static_cast<int>(GetPrivateProfileIntA("Dashboard", key, def, s_iniPath.c_str()));
+    auto num = [&](const char* key, int def) -> int {
+        auto it = kv.find(key);
+        if (it == kv.end()) return def;
+        try { return std::stoi(it->second); } catch (...) { return def; }
     };
 
-    s_cfg.url         = readStr("URL",    "http://localhost:8080/");
-    s_cfg.lastPage    = readStr("LastPage", s_cfg.url.c_str());
-    s_cfg.hotKey      = readInt("HotKey",         0x3E);
-    s_cfg.keepBg      = readInt("KeepBackground", 0) != 0;
-    s_cfg.defaultHome = readInt("DefaultHome",    0) != 0;
-    s_cfg.pauseGame   = readInt("PauseGame",      0) != 0;
-    s_cfg.winX        = readStr("WinX",    "");
-    s_cfg.winY        = readStr("WinY",    "");
-    s_cfg.winW        = readStr("WinW",    "");
-    s_cfg.winH        = readStr("WinH",    "");
-    s_cfg.winZoom     = readStr("WinZoom", "");
+    s_cfg.url         = str("URL",          "http://localhost:8080/");
+    s_cfg.lastPage    = str("LastPage",     s_cfg.url.c_str());
+    s_cfg.hotKey      = num("HotKey",       0x3E);
+    s_cfg.keepBg      = num("KeepBackground", 0) != 0;
+    s_cfg.defaultHome = num("DefaultHome",  0) != 0;
+    s_cfg.pauseGame   = num("PauseGame",    0) != 0;
+    s_cfg.winX        = str("WinX",    "");
+    s_cfg.winY        = str("WinY",    "");
+    s_cfg.winW        = str("WinW",    "");
+    s_cfg.winH        = str("WinH",    "");
+    s_cfg.winZoom     = str("WinZoom", "");
     if (!s_cfg.winZoom.empty()) {
         float z = static_cast<float>(std::atof(s_cfg.winZoom.c_str()));
         if (z < 0.20f || z > 3.0f) s_cfg.winZoom = "";
     }
-    s_cfg.winFs       = readInt("WinFs",   0) != 0;
+    s_cfg.winFs       = num("WinFs", 0) != 0;
 
     logger::info("SkyrimNetDashboard: INI loaded from '{}'", s_iniPath);
     logger::info("  URL={} HotKey=0x{:02X} keepBg={} defaultHome={} pauseGame={}",
         s_cfg.url, s_cfg.hotKey, s_cfg.keepBg, s_cfg.defaultHome, s_cfg.pauseGame);
-
-    // Auto-generate INI with defaults and comments if it doesn't exist on disk
-    if (GetFileAttributesA(s_iniPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::ofstream iniFile(s_iniPath);
-        if (iniFile.is_open()) {
-            iniFile
-                << "[Dashboard]\n"
-                << "; Full URL to your SkyrimNet instance, including port.\n"
-                << "; Default http://localhost:8080/ works for most setups.\n"
-                << "; If it doesn't, replace with your local IP, e.g. http://192.168.1.100:8080/\n"
-                << "URL=" << s_cfg.url << "\n"
-                << "\n"
-                << "; Last visited page - updated automatically, do not edit manually.\n"
-                << "LastPage=" << s_cfg.url << "\n"
-                << "\n"
-                << "; Keep the menu rendered without focus (1 = yes, 0 = no).\n"
-                << "KeepBackground=0\n"
-                << "\n"
-                << "; Always open the base URL instead of resuming the last visited page (1 = yes, 0 = no).\n"
-                << "DefaultHome=0\n"
-                << "\n"
-                << "; Pause Skyrim while the dashboard is focused (1 = yes, 0 = no).\n"
-                << "PauseGame=0\n"
-                << "\n"
-                << "; Hotkey to open/close the dashboard (DirectInput scan code, decimal).\n"
-                << "; Default 62 = F4. Common keys: 59=F1, 60=F2, 61=F3, 62=F4, 63=F5,\n"
-                << "; 64=F6, 65=F7, 66=F8, 67=F9, 68=F10, 87=F11, 88=F12.\n"
-                << "HotKey=62\n"
-                << "\n"
-                << "; Internal version marker - do not edit.\n"
-                << "Version=2\n";
-            iniFile.close();
-            logger::info("SkyrimNetDashboard: INI auto-generated with defaults");
-        } else {
-            logger::warn("SkyrimNetDashboard: failed to create INI at '{}'", s_iniPath);
-        }
-    }
 }
 
 static void SaveSettings()
 {
     if (s_iniPath.empty()) return;
-    auto ws = [&](const char* k, const std::string& v) {
-        WritePrivateProfileStringA("Dashboard", k, v.c_str(), s_iniPath.c_str());
-    };
-    auto wi = [&](const char* k, int v) {
-        WritePrivateProfileStringA("Dashboard", k, std::to_string(v).c_str(), s_iniPath.c_str());
-    };
-    // URL intentionally not written back (read-only at runtime)
-    wi("Version",       2);
-    ws("LastPage",      s_cfg.lastPage);
-    wi("HotKey",        s_cfg.hotKey);
-    wi("KeepBackground",s_cfg.keepBg      ? 1 : 0);
-    wi("DefaultHome",   s_cfg.defaultHome  ? 1 : 0);
-    wi("PauseGame",     s_cfg.pauseGame    ? 1 : 0);
-    ws("WinX",          s_cfg.winX);
-    ws("WinY",          s_cfg.winY);
-    ws("WinW",          s_cfg.winW);
-    ws("WinH",          s_cfg.winH);
-    ws("WinZoom",       s_cfg.winZoom);
-    wi("WinFs",         s_cfg.winFs ? 1 : 0);
+    WriteIniFile();
     logger::info("SkyrimNetDashboard: settings saved to INI");
 }
 

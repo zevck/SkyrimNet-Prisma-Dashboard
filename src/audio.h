@@ -80,24 +80,25 @@ static std::tuple<std::string, uint16_t, std::string>
 AudioParseUrl(const std::string& url)
 {
     std::string u = url;
-    // strip scheme
-    if (u.size() > 7 && u.substr(0, 7) == "http://")  u = u.substr(7);
-    else if (u.size() > 8 && u.substr(0, 8) == "https://") u = u.substr(8);
+    if (u.size() > 8 && u.substr(0, 8) == "https://") u = u.substr(8);
+    else if (u.size() > 7 && u.substr(0, 7) == "http://") u = u.substr(7);
 
-    auto sl = u.find('/');
-    std::string hostport = (sl != std::string::npos) ? u.substr(0, sl) : u;
-    std::string path     = (sl != std::string::npos) ? u.substr(sl)    : "/";
-
-    std::string host = hostport;
-    uint16_t    port = 80;
-    auto col = hostport.find(':');
-    if (col != std::string::npos) {
-        host = hostport.substr(0, col);
-        try { port = static_cast<uint16_t>(std::stoi(hostport.substr(col + 1))); } catch (...) {}
+    // Extract path (everything from the first / after the host)
+    std::string::size_type pathStart;
+    if (!u.empty() && u[0] == '[') {
+        auto cb = u.find(']');
+        pathStart = (cb != std::string::npos) ? u.find('/', cb) : u.find('/');
+    } else {
+        pathStart = u.find('/');
     }
+    std::string path = (pathStart != std::string::npos) ? u.substr(pathStart) : "/";
+
+    std::string host = "localhost";
+    uint16_t    port = 80;
+    ParseHostPort(url, host, port);
 
     // Redirect our local proxy back to the real SkyrimNet server
-    if (host == "127.0.0.1" || host == "localhost") {
+    if (host == "127.0.0.1" || host == "localhost" || host == "::1") {
         host = s_audioHost;
         port = s_audioPort;
     }

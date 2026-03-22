@@ -102,16 +102,72 @@ struct SockAddrIn6 {
     u_long   sin6_scope_id;
 };
 
-// Creates a connected socket to host:port.  Tries IPv4 first; if that fails
-// and the host is "localhost", tries IPv6 [::1] as a fallback (covers the
-// common case where SkyrimNet binds to [::1]:port only).
-// Once IPv6 succeeds, all future connections skip the IPv4 attempt.
+// Attempt an IPv6 connect.  Parses the host as a raw IPv6 address (no brackets).
+// Returns a connected socket or INVALID_SOCKET.
+static SOCKET ConnectIPv6(const std::string& host, uint16_t port)
+{
+    SOCKET s6 = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    if (s6 == INVALID_SOCKET) {
+        logger::warn("SkyrimNetDashboard: IPv6 socket() failed (WSA={})", WSAGetLastError());
+        return INVALID_SOCKET;
+    }
+    SockAddrIn6 addr6{};
+    addr6.sin6_family = static_cast<short>(AF_INET6);
+    addr6.sin6_port   = htons(port);
+    // Parse the IPv6 address into sin6_addr.
+    // For loopback "::1" we just set the last byte.  For other addresses
+    // we'd need inet_pton (in ws2tcpip.h which we can't include), so we
+    // only support the common loopback forms for now.
+    if (host == "::1" || host == "0:0:0:0:0:0:0:1") {
+        addr6.sin6_addr[15] = 1;
+    } else {
+        logger::warn("SkyrimNetDashboard: unsupported IPv6 address '{}' (only ::1 is supported)", host);
+        closesocket(s6);
+        return INVALID_SOCKET;
+    }
+
+    // Non-blocking connect with timeout
+    u_long nonBlock = 1;
+    ioctlsocket(s6, FIONBIO, &nonBlock);
+    int cr = connect(s6, reinterpret_cast<sockaddr*>(&addr6), sizeof(addr6));
+    if (cr == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+        fd_set wrSet, exSet;
+        FD_ZERO(&wrSet); FD_SET(s6, &wrSet);
+        FD_ZERO(&exSet); FD_SET(s6, &exSet);
+        timeval tv; tv.tv_sec = 5; tv.tv_usec = 0;
+        int sel = select(0, nullptr, &wrSet, &exSet, &tv);
+        if (sel <= 0 || FD_ISSET(s6, &exSet)) {
+            logger::warn("SkyrimNetDashboard: IPv6 [{}]:{} connect failed (sel={})", host, port, sel);
+            u_long block = 0; ioctlsocket(s6, FIONBIO, &block);
+            closesocket(s6);
+            return INVALID_SOCKET;
+        }
+    } else if (cr == SOCKET_ERROR) {
+        logger::warn("SkyrimNetDashboard: IPv6 [{}]:{} connect error (WSA={})", host, port, WSAGetLastError());
+        closesocket(s6);
+        return INVALID_SOCKET;
+    }
+    u_long block = 0;
+    ioctlsocket(s6, FIONBIO, &block);
+    return s6;
+}
+
+// Creates a connected socket to host:port.
+// - Explicit IPv6 host ("::1"): connects via IPv6 directly.
+// - "localhost": tries IPv4 first, falls back to IPv6 [::1].
+//   Once IPv6 succeeds for localhost, all future connections skip IPv4.
+// - Everything else: IPv4 only.
 // Returns INVALID_SOCKET on failure.
-static std::atomic<bool> s_useIPv6{false}; // sticky: once IPv6 works, prefer it
+static std::atomic<bool> s_useIPv6{false};
 
 static SOCKET ConnectToHost(const std::string& host, uint16_t port)
 {
-    // ── IPv4 attempt (skip if we already know IPv6 is needed) ───────────
+    // ── Explicit IPv6 address (from INI like "http://[::1]:8080/") ──────
+    if (host == "::1" || host == "0:0:0:0:0:0:0:1") {
+        return ConnectIPv6(host, port);
+    }
+
+    // ── IPv4 attempt (skip if we already know localhost needs IPv6) ──────
     if (!s_useIPv6.load()) {
         SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (s != INVALID_SOCKET) {
@@ -124,47 +180,18 @@ static SOCKET ConnectToHost(const std::string& host, uint16_t port)
         }
     }
 
-    // ── IPv6 loopback fallback ──────────────────────────────────────────
+    // ── IPv6 loopback fallback for "localhost" ──────────────────────────
     if (host == "localhost") {
         if (!s_useIPv6.load())
             logger::info("SkyrimNetDashboard: IPv4 connect to localhost:{} failed, trying IPv6 [::1]", port);
-        SOCKET s6 = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
-        if (s6 == INVALID_SOCKET) {
-            logger::warn("SkyrimNetDashboard: IPv6 socket() failed (WSA={})", WSAGetLastError());
-            return INVALID_SOCKET;
-        }
-        SockAddrIn6 addr6{};
-        addr6.sin6_family = static_cast<short>(AF_INET6);
-        addr6.sin6_port   = htons(port);
-        addr6.sin6_addr[15] = 1; // ::1
-
-        // Inline non-blocking connect (same logic as ConnectWithTimeout but
-        // for sockaddr_in6 which ConnectWithTimeout doesn't accept).
-        u_long nonBlock = 1;
-        ioctlsocket(s6, FIONBIO, &nonBlock);
-        int cr = connect(s6, reinterpret_cast<sockaddr*>(&addr6), sizeof(addr6));
-        if (cr == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
-            fd_set wrSet, exSet;
-            FD_ZERO(&wrSet); FD_SET(s6, &wrSet);
-            FD_ZERO(&exSet); FD_SET(s6, &exSet);
-            timeval tv; tv.tv_sec = 5; tv.tv_usec = 0;
-            int sel = select(0, nullptr, &wrSet, &exSet, &tv);
-            if (sel <= 0 || FD_ISSET(s6, &exSet)) {
-                logger::warn("SkyrimNetDashboard: IPv6 [::1]:{} also failed (sel={})", port, sel);
-                u_long block = 0; ioctlsocket(s6, FIONBIO, &block);
-                closesocket(s6);
-                return INVALID_SOCKET;
+        SOCKET s6 = ConnectIPv6("::1", port);
+        if (s6 != INVALID_SOCKET) {
+            if (!s_useIPv6.load()) {
+                s_useIPv6.store(true);
+                logger::info("SkyrimNetDashboard: IPv6 cached for future localhost connections");
             }
-        } else if (cr == SOCKET_ERROR) {
-            logger::warn("SkyrimNetDashboard: IPv6 [::1]:{} connect error (WSA={})", port, WSAGetLastError());
-            closesocket(s6);
-            return INVALID_SOCKET;
+            return s6;
         }
-        u_long block = 0;
-        ioctlsocket(s6, FIONBIO, &block);
-        s_useIPv6.store(true);
-        logger::info("SkyrimNetDashboard: connected via IPv6 [::1]:{} (IPv6 cached for future connections)", port);
-        return s6;
     }
 
     return INVALID_SOCKET;
@@ -1142,21 +1169,10 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
     listen(srv, 10);
     logger::info("SkyrimNetDashboard: shell server on 127.0.0.1:{}", port);
 
-    // Parse host and port from dashboardUrl ("http://host:port/")
+    // Parse host and port from dashboardUrl ("http://host:port/" or "http://[::1]:port/")
     std::string proxyHost;
-    uint16_t    proxyPort = 80;
-    {
-        std::string u = dashboardUrl;
-        if (u.substr(0, 7) == "http://") u = u.substr(7);
-        auto col = u.find(':');
-        auto sl  = u.find('/');
-        if (col != std::string::npos && col < sl) {
-            proxyHost = u.substr(0, col);
-            proxyPort = static_cast<uint16_t>(std::stoi(u.substr(col + 1, sl - col - 1)));
-        } else {
-            proxyHost = u.substr(0, sl);
-        }
-    }
+    uint16_t    proxyPort = 8080;
+    ParseHostPort(dashboardUrl, proxyHost, proxyPort);
     logger::info("SkyrimNetDashboard: proxy target {}:{} (from '{}')", proxyHost, proxyPort, dashboardUrl);
 
     // Generate a per-session auth token so only our Ultralight browser
@@ -1197,7 +1213,9 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     std::size_t clPos = hdrlower.find("content-length:");
                     if (clPos == std::string::npos) break; // no body
                     auto clEnd = rawReq.find("\r\n", clPos);
-                    int contentLen = std::stoi(rawReq.substr(clPos + 15, clEnd - clPos - 15));
+                    int contentLen = 0;
+                    try { contentLen = std::stoi(rawReq.substr(clPos + 15, clEnd - clPos - 15)); }
+                    catch (...) { break; }
                     int bodyReceived = static_cast<int>(rawReq.size()) -
                                        static_cast<int>(headerEnd + 4);
                     while (bodyReceived < contentLen) {
