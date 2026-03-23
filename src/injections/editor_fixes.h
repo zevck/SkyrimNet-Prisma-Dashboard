@@ -61,6 +61,7 @@ opacity:1!important;}
 (function(){
 var _OrigMO=window.MutationObserver;
 var _typing=false,_typingT=0;
+var _flushCM=null;
 
 function _inCm(el){
 var p=el;while(p){
@@ -72,6 +73,15 @@ document.addEventListener('keydown',function(e){
 if(!e.isTrusted||!_inCm(e.target))return;
 _typing=true;clearTimeout(_typingT);
 _typingT=setTimeout(function(){_typing=false;},150);
+},true);
+// On any click: flush pending MO mutations AND the debounced React
+// onChange callback so save handlers read current text.
+document.addEventListener('mousedown',function(){
+_typing=false;clearTimeout(_typingT);
+if(_flushCM)_flushCM();
+if(self._snpdCmCb&&self._snpdCmTmr){
+clearTimeout(self._snpdCmTmr);self._snpdCmTmr=0;
+if(self._snpdView)self._snpdCmCb(self._snpdView.state.doc.toString());}
 },true);
 
 window.MutationObserver=function(callback){
@@ -87,7 +97,9 @@ for(var i=0;i<mutations.length;i++)_pending.push(mutations[i]);
 if(!_rafId){_rafId=requestAnimationFrame(function(){
 _rafId=0;
 var batch=_pending;_pending=[];
-if(batch.length)callback(batch);});}};
+if(batch.length)callback(batch);});}
+_flushCM=function(){if(_rafId){cancelAnimationFrame(_rafId);_rafId=0;}
+var b=_pending;_pending=[];if(b.length)callback(b);};};
 var _obs=new _OrigMO(_wrappedCb);
 var _origTR=_obs.takeRecords.bind(_obs);
 _obs.takeRecords=function(){
@@ -105,10 +117,6 @@ _obs.disconnect=_obs.disconnect.bind(_obs);
 return _obs;};
 window.MutationObserver.prototype=_OrigMO.prototype;
 
-document.addEventListener('beforeinput',function(e){
-if(_inCm(e.target))e.stopImmediatePropagation();},true);
-document.addEventListener('input',function(e){
-if(_inCm(e.target))e.stopImmediatePropagation();},true);
 })();
 
 // ── CM6 drag-selection relay ──────────────────────────────────────────
