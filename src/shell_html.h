@@ -41,6 +41,15 @@ iframe{width:100%;height:100%;border:none;display:block}
 .rh[data-r=se]{bottom:-5px;right:-5px;width:18px;height:18px;cursor:se-resize}
 .rh[data-r=sw]{bottom:-5px;left:-5px;width:14px;height:14px;cursor:sw-resize}
 #W.fs .rh{display:none}
+:root{--ui-s:1}
+#B{font-size:calc(14px * var(--ui-s));padding:calc(8px * var(--ui-s)) calc(16px * var(--ui-s))}
+#L{font-size:calc(14px * var(--ui-s));gap:calc(8px * var(--ui-s))}
+#R{gap:calc(8px * var(--ui-s))}
+.btn{font-size:calc(12px * var(--ui-s));padding:calc(4px * var(--ui-s)) calc(12px * var(--ui-s));border-radius:calc(4px * var(--ui-s))}
+.btn.icon{padding:calc(4px * var(--ui-s)) calc(7px * var(--ui-s))}
+.btn svg{width:calc(14px * var(--ui-s));height:calc(14px * var(--ui-s))}
+#XB{padding:calc(4px * var(--ui-s)) calc(8px * var(--ui-s));border-radius:calc(4px * var(--ui-s))}
+#XB svg{width:calc(14px * var(--ui-s));height:calc(14px * var(--ui-s))}
 /* Persistent faint L-brackets in each corner */
 .rh[data-r=se]::before,.rh[data-r=sw]::before,.rh[data-r=ne]::before,.rh[data-r=nw]::before{content:'';position:absolute;width:7px;height:7px}
 .rh[data-r=se]::before{bottom:3px;right:3px;border-right:2px solid rgba(156,163,175,.35);border-bottom:2px solid rgba(156,163,175,.35)}
@@ -124,6 +133,9 @@ iframe{width:100%;height:100%;border:none;display:block}
   var fs=localStorage.getItem('snpd-fs')==='true';
   var zoom=parseFloat(localStorage.getItem('snpd-zoom')||'1');
   if(isNaN(zoom)||zoom<0.20||zoom>3)zoom=1;
+  // Auto-scale UI for resolution (baseline 1440p)
+  var uiScale=Math.max(0.75,Math.min(2,screen.height/1440));
+  document.documentElement.style.setProperty('--ui-s',uiScale);
   var _snpdLayoutTimer=null;
   function snpdSaveLayout(){var p={x:localStorage.getItem('snpd-x')||'',y:localStorage.getItem('snpd-y')||'',w:localStorage.getItem('snpd-w')||'',h:localStorage.getItem('snpd-h')||'',zoom:localStorage.getItem('snpd-zoom')||'1',fs:localStorage.getItem('snpd-fs')||'false'};fetch('/snpd-save-layout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)}).catch(function(){});}
   function snpdSaveLayoutDebounced(){if(_snpdLayoutTimer)clearTimeout(_snpdLayoutTimer);_snpdLayoutTimer=setTimeout(snpdSaveLayout,500);}
@@ -206,7 +218,7 @@ iframe{width:100%;height:100%;border:none;display:block}
     var ov=document.createElement('div');
     ov.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:999999;display:flex;align-items:center;justify-content:center;';
     var box=document.createElement('div');
-    box.style.cssText='background:#1f2937;border:1px solid #374151;border-radius:8px;padding:24px;min-width:340px;max-width:480px;width:90%;color:#e5e7eb;font-family:Consolas,"Courier New",monospace;font-size:13px;';
+    box.style.cssText='background:#1f2937;border:1px solid #374151;border-radius:8px;padding:24px;min-width:340px;max-width:480px;width:90%;color:#e5e7eb;font-family:Consolas,"Courier New",monospace;font-size:13px;transform:scale('+uiScale+');';
     var title=document.createElement('div');
     title.style.cssText='font-size:15px;font-weight:700;color:#f9fafb;margin-bottom:16px;border-bottom:1px solid #374151;padding-bottom:10px;';
     title.textContent='Dashboard Settings';
