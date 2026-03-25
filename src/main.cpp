@@ -383,8 +383,62 @@ static void OnDomReady(PrismaView view)
     (void)view;
 }
 
+// ── write_call hook on input dispatch (same site as Wheeler) ─────────────────
+// Installed at kPostLoadGame so we're on TOP of Wheeler's hook (which installs
+// at kDataLoaded).  Strips keyboard events before Wheeler or any other
+// write_call-based mod sees them.
+using InputDispatchFn = void(*)(RE::BSTEventSource<RE::InputEvent*>*, RE::InputEvent**);
+static InputDispatchFn s_nextDispatch = nullptr;
+
+static void hk_InputDispatch(RE::BSTEventSource<RE::InputEvent*>* a_source, RE::InputEvent** a_evns)
+{
+    if (a_evns && *a_evns && s_inputBlocked.load()) {
+        // Handle our hotkeys before stripping
+        for (auto* evt = *a_evns; evt; evt = evt->next) {
+            auto* btn = evt->AsButtonEvent();
+            if (!btn || !btn->IsDown()) continue;
+            if (btn->GetDevice() != RE::INPUT_DEVICE::kKeyboard) continue;
+            auto dk = btn->GetIDCode();
+            if (dk == s_toggleKey.load()) { OnToggle(); break; }
+            if (dk == ESC_KEY) { OnClose(); break; }
+        }
+        // Strip keyboard events, keep mouse/gamepad
+        RE::InputEvent* filtered = nullptr;
+        RE::InputEvent** tail = &filtered;
+        for (auto* evt = *a_evns; evt; ) {
+            auto* next = evt->next;
+            auto* btn = evt->AsButtonEvent();
+            bool isKeyboard = btn && btn->GetDevice() == RE::INPUT_DEVICE::kKeyboard;
+            if (!isKeyboard) {
+                evt->next = nullptr;
+                *tail = evt;
+                tail = &evt->next;
+            }
+            evt = next;
+        }
+        *a_evns = filtered;
+    }
+    s_nextDispatch(a_source, a_evns);
+}
+
+static void InstallDispatchHook()
+{
+    SKSE::AllocTrampoline(14);
+    REL::Relocation<uintptr_t> caller{ REL::RelocationID(67315, 68617) };
+    s_nextDispatch = reinterpret_cast<InputDispatchFn>(
+        SKSE::GetTrampoline().write_call<5>(
+            caller.address() + REL::Relocate(0x7B, 0x7B, 0x81),
+            reinterpret_cast<uintptr_t>(&hk_InputDispatch)));
+    logger::info("SkyrimNetDashboard: dispatch write_call hook installed (on top of Wheeler)");
+}
+
 static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
 {
+    // Install dispatch hook at kPostLoadGame — AFTER Wheeler hooks at kDataLoaded
+    if (a_message->type == SKSE::MessagingInterface::kPostLoadGame ||
+        a_message->type == SKSE::MessagingInterface::kNewGame) {
+        if (!s_nextDispatch) InstallDispatchHook();
+    }
     if (a_message->type != SKSE::MessagingInterface::kDataLoaded) {
         return;
     }
