@@ -359,8 +359,23 @@ static void SetClipboardTextW32(const std::string& text)
 // newline guard into an HTML document string.
 static std::string InjectPatches(std::string body)
 {
+    // Restore persisted localStorage synchronously BEFORE any app scripts run.
+    // This must be inline (not async fetch) so the React app sees the data
+    // on its very first localStorage read.
+    std::string storageRestore;
+    {
+        std::string storageJson = ReadStorage();
+        if (storageJson.size() > 2) {
+            std::string b64 = Base64Encode(storageJson);
+            storageRestore = "<script>try{var d=JSON.parse(atob('";
+            storageRestore += b64;
+            storageRestore += "'));var k=Object.keys(d);for(var i=0;i<k.length;i++)localStorage.setItem(k[i],d[k[i]]);}catch(e){}</script>\n";
+        }
+    }
+
     // Build injection from modular components
-    std::string injection = 
+    std::string injection =
+        storageRestore +
         Injections::GetEditorFixes() +
         "<script>\n" +
         Injections::GetClipboardIntegration() +

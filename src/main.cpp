@@ -63,6 +63,13 @@ static constexpr const char* JS_SHOW =
 static constexpr const char* JS_GO_HOME =
     "(function(){var fr=document.getElementById('snpd-frame');if(fr)fr.src='/proxy';})();";
 
+// Tracks whether our view was focused on the last poll cycle.
+// When focus is lost without us calling Unfocus (another mod stole it),
+// we auto-hide to avoid leaving a stuck visible-but-unfocused window.
+static std::atomic<bool> s_wasFocused{false};
+static std::atomic<bool> s_weUnfocused{false}; // set before intentional Unfocus
+static std::atomic<int64_t> s_focusGrace{0};   // ignore focus-loss until this time (ms)
+
 static void OnToggle()
 {
     if (!s_PrismaUI || !s_PrismaUI->IsValid(s_View)) {
@@ -74,7 +81,11 @@ static void OnToggle()
         // Show, restore visibility state, then focus
         s_PrismaUI->Show(s_View);
         s_PrismaUI->Invoke(s_View, JS_SHOW);
+        s_weUnfocused.store(false);
         [[maybe_unused]] bool focused = s_PrismaUI->Focus(s_View, s_cfg.pauseGame);
+        s_wasFocused.store(true);
+        s_focusGrace.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count() + 300);
         logger::info("SkyrimNetDashboard: opened.");
     }
     else if (s_PrismaUI->HasFocus(s_View)) {
@@ -83,6 +94,8 @@ static void OnToggle()
         // background while the player is in-game.  The in-player bottom-bar
         // pause button is the intended way to stop audio.
         s_PrismaUI->Invoke(s_View, JS_HIDE);
+        s_weUnfocused.store(true);
+        s_wasFocused.store(false);
         s_PrismaUI->Unfocus(s_View);
         // Navigate home while the view is hidden/background so the user
         // sees the correct page immediately on next open (no visible reload).
@@ -96,7 +109,11 @@ static void OnToggle()
     }
     else {
         // Visible but not focused — re-focus (pause if configured)
+        s_weUnfocused.store(false);
         [[maybe_unused]] bool refocused = s_PrismaUI->Focus(s_View, s_cfg.pauseGame);
+        s_wasFocused.store(true);
+        s_focusGrace.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count() + 300);
     }
 }
 
@@ -106,6 +123,8 @@ static void OnClose()
     if (!s_PrismaUI->IsHidden(s_View)) {
         // Do NOT stop audio — see comment in OnToggle above.
         s_PrismaUI->Invoke(s_View, JS_HIDE);
+        s_weUnfocused.store(true);
+        s_wasFocused.store(false);
         s_PrismaUI->Unfocus(s_View);
         if (!s_cfg.keepBg)
             s_PrismaUI->Hide(s_View);
@@ -151,7 +170,24 @@ static void StartClipboardMonitor()
         for (;;) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             if (!s_PrismaUI || !s_View) { prevC = prevV = prevX = false; continue; }
-            if (s_PrismaUI->IsHidden(s_View) || !s_PrismaUI->HasFocus(s_View)) { prevC = prevV = prevX = false; continue; }
+            // Focus-loss detection: if we were focused but now aren't,
+            // and we didn't intentionally unfocus, another mod stole focus.
+            // Auto-hide to avoid a stuck visible-but-unfocused window.
+            bool hasFocus = s_PrismaUI->HasFocus(s_View);
+            bool isHidden = s_PrismaUI->IsHidden(s_View);
+            auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (s_wasFocused.load() && !hasFocus && !s_weUnfocused.load() && !isHidden
+                && now > s_focusGrace.load()) {
+                logger::info("SkyrimNetDashboard: focus stolen by another mod — auto-hiding.");
+                s_wasFocused.store(false);
+                s_PrismaUI->Invoke(s_View, JS_HIDE);
+                if (!s_cfg.keepBg)
+                    s_PrismaUI->Hide(s_View);
+                prevC = prevV = prevX = false;
+                continue;
+            }
+            if (isHidden || !hasFocus) { prevC = prevV = prevX = false; continue; }
             bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             bool curC  = (GetAsyncKeyState('C') & 0x8000) != 0;
             bool curV  = (GetAsyncKeyState('V') & 0x8000) != 0;

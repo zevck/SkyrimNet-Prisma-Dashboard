@@ -112,6 +112,16 @@ iframe{width:100%;height:100%;border:none;display:block}
                 "localStorage.setItem('snpd-fs',sl.fs);"
                 "window.snpdInitKeepBg=sl.keepBg;"
                 "})();</script>";
+
+        // Restore persisted localStorage before iframe loads (same origin = shared localStorage)
+        std::string storageJson = ReadStorage();
+        if (storageJson.size() > 2) {
+            std::string b64 = Base64Encode(storageJson);
+            html += "<script>try{var d=JSON.parse(atob('";
+            html += b64;
+            html += "'));var k=Object.keys(d);for(var i=0;i<k.length;i++)localStorage.setItem(k[i],d[k[i]]);}catch(e){}</script>";
+            logger::info("SkyrimNetDashboard: shell restore script injected ({} keys from {} bytes)", "?", storageJson.size());
+        }
     }
     html +=
     R"SHELL2(

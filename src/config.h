@@ -96,15 +96,42 @@ static std::string JsonEscape(const std::string& s)
 }
 
 // ── Browser storage persistence ──────────────────────────────────────────────
+
+// Fixes double-escaped JSON from browser `JSON.stringify(localStorage)` output.
+// Browsers produce {\\"key\\": ...} because values are already stringified JSON
+// and stringify escapes the backslashes again.  We collapse \\\\ → \\ so the
+// result is valid single-escaped JSON.
+static std::string FixDoubleEscapedJson(const std::string& s)
+{
+    // Quick check: if it parses as-is (no \\\\), return unchanged.
+    // Look for \\\\ followed by " which is the telltale sign.
+    if (s.find("\\\\\"") == std::string::npos) return s;
+
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i+1 < s.size() && s[i+1] == '\\') {
+            out += '\\';   // collapse \\\\ to single backslash
+            ++i;           // skip second backslash
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
 // Reads the .storage.json file (raw JSON blob of the iframe's localStorage).
+// Automatically fixes double-escaped JSON from browser JSON.stringify(localStorage).
 static std::string ReadStorage()
 {
-    if (s_storagePath.empty()) return "{}";
+    if (s_storagePath.empty()) { logger::warn("SkyrimNetDashboard: ReadStorage: path empty"); return "{}"; }
     std::ifstream in(s_storagePath);
-    if (!in.is_open()) return "{}";
+    if (!in.is_open()) { logger::warn("SkyrimNetDashboard: ReadStorage: failed to open"); return "{}"; }
     std::string content((std::istreambuf_iterator<char>(in)),
                          std::istreambuf_iterator<char>());
-    return content.empty() ? "{}" : content;
+    if (content.empty()) return "{}";
+    content = FixDoubleEscapedJson(content);
+    return content;
 }
 
 // Writes the raw JSON blob to .storage.json.
@@ -113,6 +140,24 @@ static void WriteStorage(const std::string& json)
     if (s_storagePath.empty()) return;
     std::ofstream out(s_storagePath);
     if (out.is_open()) out << json;
+}
+
+// Base64-encode a string (used to safely embed JSON in inline scripts).
+static std::string Base64Encode(const std::string& src)
+{
+    static const char b64c[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string b64;
+    b64.reserve((src.size() + 2) / 3 * 4);
+    for (size_t i = 0; i < src.size(); i += 3) {
+        uint32_t n = static_cast<unsigned char>(src[i]) << 16;
+        if (i+1 < src.size()) n |= static_cast<unsigned char>(src[i+1]) << 8;
+        if (i+2 < src.size()) n |= static_cast<unsigned char>(src[i+2]);
+        b64 += b64c[(n >> 18) & 0x3F];
+        b64 += b64c[(n >> 12) & 0x3F];
+        b64 += (i+1 < src.size()) ? b64c[(n >> 6) & 0x3F] : '=';
+        b64 += (i+2 < src.size()) ? b64c[n & 0x3F] : '=';
+    }
+    return b64;
 }
 
 // DX scancode → display name table (shared by DxKeyName and SettingsToJson)
