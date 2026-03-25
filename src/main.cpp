@@ -1,4 +1,6 @@
 #include "pch.h"
+#include <Psapi.h>
+#pragma comment(lib, "Psapi.lib")
 #include "PrismaUI_API.h"
 #include "keyhandler/keyhandler.h"
 
@@ -63,6 +65,92 @@ static constexpr const char* JS_SHOW =
 static constexpr const char* JS_GO_HOME =
     "(function(){var fr=document.getElementById('snpd-frame');if(fr)fr.src='/proxy';})();";
 
+// ── Input blocking via GetAsyncKeyState IAT hook ─────────────────────────────
+// Mods like IntelEngine use GetAsyncKeyState to detect hotkeys.  We patch their
+// IAT entries so GAKS returns 0 while the dashboard is focused.  PrismaUI and
+// Ultralight modules are excluded so dashboard input is unaffected.
+static std::atomic<bool> s_inputBlocked{false};
+
+using GAKS_t = SHORT(WINAPI*)(int);
+static GAKS_t s_origGAKS = nullptr;
+
+static SHORT WINAPI hk_GetAsyncKeyState(int vKey)
+{
+    if (s_inputBlocked.load())
+        return 0;
+    return s_origGAKS(vKey);
+}
+
+static bool PatchModuleGAKS(HMODULE hMod, void* realGAKS, const char* name)
+{
+    auto* dos = reinterpret_cast<PIMAGE_DOS_HEADER>(hMod);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto* nt = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<uint8_t*>(hMod) + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) return false;
+    auto* imp = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(reinterpret_cast<uint8_t*>(hMod) + dir.VirtualAddress);
+    for (; imp->Name; ++imp) {
+        auto* thunk = reinterpret_cast<PIMAGE_THUNK_DATA>(reinterpret_cast<uint8_t*>(hMod) + imp->FirstThunk);
+        for (; thunk->u1.Function; ++thunk) {
+            if (reinterpret_cast<void*>(thunk->u1.Function) == realGAKS) {
+                DWORD old;
+                if (VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+                    thunk->u1.Function = reinterpret_cast<ULONG_PTR>(&hk_GetAsyncKeyState);
+                    VirtualProtect(&thunk->u1.Function, sizeof(void*), old, &old);
+                    logger::info("SkyrimNetDashboard: GAKS patched in {}", name);
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+static void InstallInputBlocker()
+{
+    HMODULE hUser32 = GetModuleHandleA("user32.dll");
+    if (!hUser32) return;
+    void* realGAKS = reinterpret_cast<void*>(GetProcAddress(hUser32, "GetAsyncKeyState"));
+    if (!realGAKS) return;
+    s_origGAKS = reinterpret_cast<GAKS_t>(realGAKS);
+
+    HMODULE hMods[512];
+    DWORD cbNeeded = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), hMods, sizeof(hMods), &cbNeeded)) return;
+
+    wchar_t sysDir[MAX_PATH] = {};
+    GetSystemDirectoryW(sysDir, MAX_PATH);
+    std::wstring sysPfx(sysDir);
+    for (auto& c : sysPfx) c = towlower(c);
+
+    HMODULE hGameExe = GetModuleHandleA(nullptr);
+    int patched = 0;
+    for (DWORD i = 0; i < cbNeeded / sizeof(HMODULE); ++i) {
+        if (hMods[i] == hGameExe) continue;
+        wchar_t path[MAX_PATH] = {};
+        GetModuleFileNameW(hMods[i], path, MAX_PATH);
+        std::wstring lp(path);
+        for (auto& c : lp) c = towlower(c);
+        // Skip system DLLs
+        if (lp.find(sysPfx) == 0 || lp.find(L"\\windows\\") != std::wstring::npos) continue;
+        // Skip PrismaUI / Ultralight / ourselves
+        if (lp.find(L"prismaui") != std::wstring::npos) continue;
+        if (lp.find(L"ultralight") != std::wstring::npos) continue;
+        if (lp.find(L"webcore") != std::wstring::npos) continue;
+        if (lp.find(L"appcore") != std::wstring::npos) continue;
+        if (lp.find(L"skyrimnetprismadashboard") != std::wstring::npos) continue;
+
+        char nameA[MAX_PATH] = {};
+        GetModuleFileNameA(hMods[i], nameA, MAX_PATH);
+        std::string stem(nameA);
+        auto sl = stem.rfind('\\');
+        if (sl != std::string::npos) stem = stem.substr(sl + 1);
+        if (PatchModuleGAKS(hMods[i], realGAKS, stem.c_str())) patched++;
+    }
+    logger::info("SkyrimNetDashboard: GAKS input blocker patched {} modules", patched);
+}
+
 // Tracks whether our view was focused on the last poll cycle.
 // When focus is lost without us calling Unfocus (another mod stole it),
 // we auto-hide to avoid leaving a stuck visible-but-unfocused window.
@@ -83,6 +171,7 @@ static void OnToggle()
         s_PrismaUI->Invoke(s_View, JS_SHOW);
         s_weUnfocused.store(false);
         [[maybe_unused]] bool focused = s_PrismaUI->Focus(s_View, s_cfg.pauseGame);
+        s_inputBlocked.store(true);
         s_wasFocused.store(true);
         s_focusGrace.store(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count() + 300);
@@ -95,6 +184,7 @@ static void OnToggle()
         // pause button is the intended way to stop audio.
         s_PrismaUI->Invoke(s_View, JS_HIDE);
         s_weUnfocused.store(true);
+        s_inputBlocked.store(false);
         s_wasFocused.store(false);
         s_PrismaUI->Unfocus(s_View);
         // Navigate home while the view is hidden/background so the user
@@ -111,6 +201,7 @@ static void OnToggle()
         // Visible but not focused — re-focus (pause if configured)
         s_weUnfocused.store(false);
         [[maybe_unused]] bool refocused = s_PrismaUI->Focus(s_View, s_cfg.pauseGame);
+        s_inputBlocked.store(true);
         s_wasFocused.store(true);
         s_focusGrace.store(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count() + 300);
@@ -124,6 +215,7 @@ static void OnClose()
         // Do NOT stop audio — see comment in OnToggle above.
         s_PrismaUI->Invoke(s_View, JS_HIDE);
         s_weUnfocused.store(true);
+        s_inputBlocked.store(false);
         s_wasFocused.store(false);
         s_PrismaUI->Unfocus(s_View);
         if (!s_cfg.keepBg)
@@ -180,7 +272,8 @@ static void StartClipboardMonitor()
             if (s_wasFocused.load() && !hasFocus && !s_weUnfocused.load() && !isHidden
                 && now > s_focusGrace.load()) {
                 logger::info("SkyrimNetDashboard: focus stolen by another mod — auto-hiding.");
-                s_wasFocused.store(false);
+                s_inputBlocked.store(false);
+        s_wasFocused.store(false);
                 s_PrismaUI->Invoke(s_View, JS_HIDE);
                 if (!s_cfg.keepBg)
                     s_PrismaUI->Hide(s_View);
@@ -188,10 +281,11 @@ static void StartClipboardMonitor()
                 continue;
             }
             if (isHidden || !hasFocus) { prevC = prevV = prevX = false; continue; }
-            bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            bool curC  = (GetAsyncKeyState('C') & 0x8000) != 0;
-            bool curV  = (GetAsyncKeyState('V') & 0x8000) != 0;
-            bool curX  = (GetAsyncKeyState('X') & 0x8000) != 0;
+            auto GAKS = s_origGAKS ? s_origGAKS : &GetAsyncKeyState;
+            bool ctrl = (GAKS(VK_CONTROL) & 0x8000) != 0;
+            bool curC  = (GAKS('C') & 0x8000) != 0;
+            bool curV  = (GAKS('V') & 0x8000) != 0;
+            bool curX  = (GAKS('X') & 0x8000) != 0;
             if (ctrl) {
                 if (curC && !prevC) {
                     // Copy: invoke __snpdCopy in the iframe, write result to Win32 clipboard
@@ -280,6 +374,7 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     s_PrismaUI->SetScrollingPixelSize(s_View, 120);
     s_PrismaUI->Hide(s_View); // Always start hidden; keepBg only affects close-to-background behavior
 
+    InstallInputBlocker();   // Block other mods' GetAsyncKeyState while dashboard is focused
     StartClipboardMonitor(); // C++ Ctrl+C/V polling — bypasses Ultralight event quirks
 
     // Close button in the HTML calls window.closeDashboard('') — wire it to OnToggle
