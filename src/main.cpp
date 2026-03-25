@@ -9,6 +9,7 @@
 #include "injections/editor_fixes.h"
 #include "injections/file_input.h"
 #include "injections/autoscroll.h"
+#include "injections/storage_persist.h"
 
 // -----------------------------------------------------------------------
 //  SkyrimNet Prisma Dashboard

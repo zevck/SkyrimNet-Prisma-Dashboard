@@ -13,3 +13,4 @@ images/SkyrimNetPrismaDashboard.ini
 *.zip
 .claude/settings.local.json
 /.resources
+SKSE/Plugins/SkyrimNetPrismaDashboard.storage.json

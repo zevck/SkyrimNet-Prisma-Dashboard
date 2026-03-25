@@ -65,7 +65,8 @@ struct DashboardSettings {
 
 static DashboardSettings s_cfg;
 static std::mutex        s_cfgMtx;  // protects concurrent reads/writes of s_cfg from HTTP handler threads
-static std::string       s_iniPath; // full path to the INI, populated in Load
+static std::string       s_iniPath;     // full path to the INI, populated in Load
+static std::string       s_storagePath; // full path to the .storage.json file
 
 // Escape a string for safe inclusion inside a JSON double-quoted value.
 // Handles \, ", and control characters (U+0000 through U+001F).
@@ -92,6 +93,26 @@ static std::string JsonEscape(const std::string& s)
         }
     }
     return out;
+}
+
+// ── Browser storage persistence ──────────────────────────────────────────────
+// Reads the .storage.json file (raw JSON blob of the iframe's localStorage).
+static std::string ReadStorage()
+{
+    if (s_storagePath.empty()) return "{}";
+    std::ifstream in(s_storagePath);
+    if (!in.is_open()) return "{}";
+    std::string content((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+    return content.empty() ? "{}" : content;
+}
+
+// Writes the raw JSON blob to .storage.json.
+static void WriteStorage(const std::string& json)
+{
+    if (s_storagePath.empty()) return;
+    std::ofstream out(s_storagePath);
+    if (out.is_open()) out << json;
 }
 
 // DX scancode → display name table (shared by DxKeyName and SettingsToJson)
@@ -245,7 +266,9 @@ static void LoadSettings()
         GetModuleFileNameA(hm, modPath, MAX_PATH);
         std::string mp(modPath);
         auto dot = mp.rfind('.');
-        s_iniPath = (dot != std::string::npos ? mp.substr(0, dot) : mp) + ".ini";
+        auto base = (dot != std::string::npos ? mp.substr(0, dot) : mp);
+        s_iniPath     = base + ".ini";
+        s_storagePath = base + ".storage.json";
     }
 
     // Auto-generate INI with defaults if it doesn't exist

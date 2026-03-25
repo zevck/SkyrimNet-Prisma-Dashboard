@@ -368,6 +368,7 @@ static std::string InjectPatches(std::string body)
         Injections::GetDragSelect() +
         Injections::GetFileInputPolyfill() +
         Injections::GetAutoscroll() +
+        Injections::GetStoragePersist() +
         "</script>\n";
 
     std::string lower = body;
@@ -1755,6 +1756,13 @@ static uint16_t StartShellServer(const std::string& shellHtml, const std::string
                     s_cfg.winFs = (fsStr == "true");
                     SaveSettings();
                 }
+                body        = "{\"saved\":true}";
+                contentType = "application/json";
+            } else if (path == "/snpd-storage-get") {
+                body        = ReadStorage();
+                contentType = "application/json";
+            } else if (path == "/snpd-storage-save") {
+                WriteStorage(reqBody);
                 body        = "{\"saved\":true}";
                 contentType = "application/json";
             } else if (path == "/audio-raw") {
