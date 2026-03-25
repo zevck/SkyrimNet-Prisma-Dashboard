@@ -158,6 +158,55 @@ static std::atomic<bool> s_wasFocused{false};
 static std::atomic<bool> s_weUnfocused{false}; // set before intentional Unfocus
 static std::atomic<int64_t> s_focusGrace{0};   // ignore focus-loss until this time (ms)
 
+static void OnToggle();
+static void OnClose();
+
+// ── Input event sink — nulls events while dashboard is focused ───────────────
+// Registered as PrependEventSink so we run first.  Instead of kStop (which
+// stalls the pipeline and blocks PrismaUI), we null the events and return
+// kContinue.  Other sinks run but see nothing.  PrismaUI gets input from
+// DirectInput/WndProc, not from this event system.
+class InputBlockSink : public RE::BSTEventSink<RE::InputEvent*> {
+public:
+    RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* a_event,
+        RE::BSTEventSource<RE::InputEvent*>*) override
+    {
+        if (!s_inputBlocked.load() || !a_event || !*a_event)
+            return RE::BSEventNotifyControl::kContinue;
+
+        // Check for our hotkeys before filtering
+        for (auto* evt = *a_event; evt; evt = evt->next) {
+            auto* btn = evt->AsButtonEvent();
+            if (!btn || !btn->IsDown()) continue;
+            if (btn->GetDevice() != RE::INPUT_DEVICE::kKeyboard) continue;
+            auto dk = btn->GetIDCode();
+            if (dk == s_toggleKey.load()) { OnToggle(); break; }
+            if (dk == ESC_KEY) { OnClose(); break; }
+        }
+
+        // Remove keyboard events from the chain, keep mouse/gamepad
+        RE::InputEvent* filtered = nullptr;
+        RE::InputEvent** tail = &filtered;
+        for (auto* evt = *a_event; evt; ) {
+            auto* next = evt->next;
+            auto* btn = evt->AsButtonEvent();
+            bool isKeyboard = btn && btn->GetDevice() == RE::INPUT_DEVICE::kKeyboard;
+            if (!isKeyboard) {
+                evt->next = nullptr;
+                *tail = evt;
+                tail = &evt->next;
+            }
+            evt = next;
+        }
+        *const_cast<RE::InputEvent**>(a_event) = filtered;
+        return RE::BSEventNotifyControl::kContinue;
+    }
+    static InputBlockSink* GetSingleton() {
+        static InputBlockSink instance;
+        return &instance;
+    }
+};
+
 static void OnToggle()
 {
     if (!s_PrismaUI || !s_PrismaUI->IsValid(s_View)) {
@@ -374,6 +423,9 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     s_PrismaUI->SetScrollingPixelSize(s_View, 120);
     s_PrismaUI->Hide(s_View); // Always start hidden; keepBg only affects close-to-background behavior
 
+    // Register input event sink at the FRONT of the sink list so we run before all other mods
+    RE::BSInputDeviceManager::GetSingleton()->PrependEventSink(InputBlockSink::GetSingleton());
+    logger::info("SkyrimNetDashboard: input event sink prepended");
     InstallInputBlocker();   // Block other mods' GetAsyncKeyState while dashboard is focused
     StartClipboardMonitor(); // C++ Ctrl+C/V polling — bypasses Ultralight event quirks
 
