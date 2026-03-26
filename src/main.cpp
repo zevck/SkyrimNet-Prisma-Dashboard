@@ -451,6 +451,7 @@ static void hk_InputDispatch(RE::BSTEventSource<RE::InputEvent*>* a_source, RE::
 {
     if (a_evns && *a_evns && s_inputBlocked.load()) {
         // Handle our hotkeys before stripping
+        bool ctrlHeld = s_origGAKS && (s_origGAKS(VK_CONTROL) & 0x8000);
         for (auto* evt = *a_evns; evt; evt = evt->next) {
             auto* btn = evt->AsButtonEvent();
             if (!btn || !btn->IsDown()) continue;
@@ -458,6 +459,16 @@ static void hk_InputDispatch(RE::BSTEventSource<RE::InputEvent*>* a_source, RE::
             auto dk = btn->GetIDCode();
             if (dk == s_toggleKey.load()) { OnToggle(); break; }
             if (dk == ESC_KEY) { OnClose(); break; }
+
+            // Ctrl+Plus / Ctrl+Minus / Ctrl+0 zoom
+            if (ctrlHeld) {
+                if (dk == 0x0D) // = / + key
+                    s_PrismaUI->Invoke(s_View, "if(window.snpdZoomIn)snpdZoomIn();");
+                else if (dk == 0x0C) // - key
+                    s_PrismaUI->Invoke(s_View, "if(window.snpdZoomOut)snpdZoomOut();");
+                else if (dk == 0x0B) // 0 key
+                    s_PrismaUI->Invoke(s_View, "if(window.snpdZoomReset)snpdZoomReset();");
+            }
         }
         // Strip keyboard events, keep mouse/gamepad
         RE::InputEvent* filtered = nullptr;

@@ -12,6 +12,59 @@ namespace Injections {
 inline std::string GetFileInputPolyfill()
 {
     return R"FILEINP(
+// ── Blob URL polyfill ────────────────────────────────────────────────────────
+// Ultralight's blob: URLs don't resolve for <img> src.  Store blobs in a map
+// keyed by fake URL, then resolve asynchronously when an <img> uses the URL.
+(function(){
+var _blobs={};
+var _id=0;
+var _origCreate=URL.createObjectURL;
+var _origRevoke=URL.revokeObjectURL;
+URL.createObjectURL=function(blob){
+var key='snpd-blob:'+(++_id);
+_blobs[key]=blob;
+// Eagerly convert to data URL and patch any elements using this key
+var fr=new FileReader();
+fr.onloadend=function(){
+if(!fr.result)return;
+_blobs[key]=fr.result; // replace blob with data URL
+var imgs=document.querySelectorAll('img[src="'+key+'"]');
+for(var i=0;i<imgs.length;i++)imgs[i].src=fr.result;
+// Also check background-image styles
+var all=document.querySelectorAll('[style*="'+key+'"]');
+for(var i=0;i<all.length;i++){
+all[i].style.backgroundImage=all[i].style.backgroundImage.replace(key,fr.result);
+}};
+fr.readAsDataURL(blob);
+return key;
+};
+URL.revokeObjectURL=function(url){
+if(url&&_blobs[url]){delete _blobs[url];return;}
+if(_origRevoke)_origRevoke.call(URL,url);
+};
+// Intercept img.src to resolve snpd-blob: URLs
+var _srcDesc=Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,'src');
+if(_srcDesc&&_srcDesc.set){
+Object.defineProperty(HTMLImageElement.prototype,'src',{
+get:_srcDesc.get,
+set:function(v){
+if(v&&typeof v==='string'&&v.indexOf('snpd-blob:')===0){
+var d=_blobs[v];
+if(d&&typeof d==='string'){_srcDesc.set.call(this,d);return;}
+// Data URL not ready yet — set a placeholder and wait
+var img=this;
+_srcDesc.set.call(this,'');
+var check=setInterval(function(){
+var d2=_blobs[v];
+if(d2&&typeof d2==='string'){clearInterval(check);_srcDesc.set.call(img,d2);}
+},50);
+return;
+}
+_srcDesc.set.call(this,v);
+},configurable:true,enumerable:true});
+}
+})();
+
 // ── Native file picker for <input type="file"> ───────────────────────────────
 (function(){
 // Page-context accept override: if the page URL contains a known keyword,

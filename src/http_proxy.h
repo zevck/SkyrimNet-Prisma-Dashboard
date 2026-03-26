@@ -457,76 +457,10 @@ static std::string PatchCSS(std::string body)
             logger::info("SkyrimNetDashboard: PatchCSS: stripped {} backdrop-filter declarations", count);
     }
 
-    // Ultralight renders CSS transitions in software — every transition-property
-    // frame is a full repaint.  Tailwind compiles hundreds of transition-*
-    // utilities; strip them to avoid continuous repainting on hover/focus/etc.
-    {
-        int count = 0;
-        std::string::size_type pos = 0;
-        // Covers transition:, transition-property:, transition-duration:, etc.
-        static const std::string tp = "transition";
-        while ((pos = body.find(tp, pos)) != std::string::npos) {
-            // Must be at start or after { or ; (i.e. a CSS property, not a substring)
-            if (pos > 0) {
-                char prev = body[pos - 1];
-                if (prev != '{' && prev != ';' && prev != ' ' && prev != '\n') {
-                    pos += tp.size();
-                    continue;
-                }
-            }
-            // Check it looks like a declaration (followed by - or :)
-            auto after = pos + tp.size();
-            if (after < body.size() && body[after] != ':' && body[after] != '-') {
-                pos = after;
-                continue;
-            }
-            auto semi = body.find(';', pos);
-            if (semi == std::string::npos) break;
-            std::fill(body.begin() + pos, body.begin() + semi + 1, ' ');
-            pos = semi + 1;
-            ++count;
-        }
-        if (count)
-            logger::info("SkyrimNetDashboard: PatchCSS: stripped {} transition declarations", count);
-    }
-
-    // CSS animations (keyframes) also cause continuous repaints in Ultralight.
-    // Strip animation: and animation-* declarations, but preserve spin/rotate
-    // animations used for loading spinners (important for perceived responsiveness).
-    {
-        int count = 0;
-        std::string::size_type pos = 0;
-        static const std::string ap = "animation";
-        while ((pos = body.find(ap, pos)) != std::string::npos) {
-            if (pos > 0) {
-                char prev = body[pos - 1];
-                if (prev != '{' && prev != ';' && prev != ' ' && prev != '\n') {
-                    pos += ap.size();
-                    continue;
-                }
-            }
-            auto after = pos + ap.size();
-            if (after < body.size() && body[after] != ':' && body[after] != '-') {
-                pos = after;
-                continue;
-            }
-            auto semi = body.find(';', pos);
-            if (semi == std::string::npos) break;
-            // Check if this animation value references a spinner/rotate
-            std::string val = body.substr(pos, semi - pos);
-            if (val.find("spin") != std::string::npos ||
-                val.find("rotate") != std::string::npos ||
-                val.find("loading") != std::string::npos) {
-                pos = semi + 1;
-                continue;  // preserve spinner animations
-            }
-            std::fill(body.begin() + pos, body.begin() + semi + 1, ' ');
-            pos = semi + 1;
-            ++count;
-        }
-        if (count)
-            logger::info("SkyrimNetDashboard: PatchCSS: stripped {} animation declarations", count);
-    }
+    // NOTE: CSS transitions and animations are intentionally preserved.
+    // They are infrequent (hover/focus/page-transition) and make the UI
+    // feel more responsive.  The CM6 cursor blink (continuous, costly)
+    // is still killed in editor_fixes.h.
 
     // box-shadow with blur radii cause expensive software rasterization each frame.
     // Strip all box-shadow declarations — the app's visual design doesn't need them

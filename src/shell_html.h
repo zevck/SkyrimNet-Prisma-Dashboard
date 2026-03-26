@@ -226,6 +226,10 @@ iframe{width:100%;height:100%;border:none;display:block}
       e.preventDefault();zoom=1;applyZoom();snpdSaveLayoutDebounced();
     }
   },true);
+  // Expose zoom functions for C++ Invoke (dispatch hook can't access IIFE vars)
+  window.snpdZoomIn=function(){zoom=Math.min(3,Math.round((zoom+0.1)*100)/100);applyZoom();snpdSaveLayoutDebounced();};
+  window.snpdZoomOut=function(){zoom=Math.max(0.20,Math.round((zoom-0.1)*100)/100);applyZoom();snpdSaveLayoutDebounced();};
+  window.snpdZoomReset=function(){zoom=1;applyZoom();snpdSaveLayoutDebounced();};
   // ── Settings modal ──────────────────────────────────────────────────────────
   var STMO=null; // settings modal overlay element
   function snpdBuildModal(cfg){
