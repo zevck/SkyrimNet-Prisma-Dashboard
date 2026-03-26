@@ -19,12 +19,6 @@ var _origRemoveItem=Storage.prototype.removeItem;
 var _origClear=Storage.prototype.clear;
 var _loaded=false;
 
-// Snapshot localStorage BEFORE the app runs — captures restored data.
-var _snapshot={};
-for(var _si=0;_si<localStorage.length;_si++){
-var _sk=localStorage.key(_si);
-if(_sk&&_sk.indexOf('snpd-')!==0&&_sk[0]!=='_')
-_snapshot[_sk]=localStorage.getItem(_sk);}
 
 function _getAllStorage(){
 var data={};
@@ -42,15 +36,11 @@ headers:{'Content-Type':'application/json'},
 body:JSON.stringify(data)}).catch(function(){});
 },500);}
 
-// Override Storage.prototype to catch all write patterns
 Storage.prototype.setItem=function(k,v){
-// Block writes that would shrink a snapshot value (app defaults replacing imported data)
-if(_snapshot[k]&&typeof v==='string'&&v.length<_snapshot[k].length)return;
 _origSetItem.call(this,k,v);
 if(_loaded&&k.indexOf('snpd-')!==0)_scheduleSave();};
 
 Storage.prototype.removeItem=function(k){
-if(_snapshot[k])return;
 _origRemoveItem.call(this,k);
 if(_loaded&&k.indexOf('snpd-')!==0)_scheduleSave();};
 

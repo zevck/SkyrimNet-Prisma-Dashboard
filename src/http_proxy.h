@@ -367,13 +367,13 @@ static std::string InjectPatches(std::string body)
         std::string storageJson = ReadStorage();
         if (storageJson.size() > 2) {
             std::string b64 = Base64Encode(storageJson);
-            storageRestore = "<script>try{var d=JSON.parse(atob('";
+            storageRestore = "<script>try{if(!sessionStorage.getItem('_snpd_restored')){var d=JSON.parse(atob('";
             storageRestore += b64;
-            storageRestore += "'));var k=Object.keys(d);for(var i=0;i<k.length;i++)localStorage.setItem(k[i],d[k[i]]);}catch(e){}</script>\n";
+            storageRestore += "'));var k=Object.keys(d);for(var i=0;i<k.length;i++)localStorage.setItem(k[i],d[k[i]]);sessionStorage.setItem('_snpd_restored','1');}}catch(e){}</script>\n";
         }
     }
 
-    // Build injection from modular components
+    // Build injection from modular components — binary search for tutorial bug
     std::string injection =
         storageRestore +
         Injections::GetEditorFixes() +
