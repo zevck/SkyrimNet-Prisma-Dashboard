@@ -43,6 +43,7 @@ iframe{width:100%;height:100%;border:none;display:block}
 .rh[data-r=se]{bottom:-5px;right:-5px;width:18px;height:18px;cursor:se-resize}
 .rh[data-r=sw]{bottom:-5px;left:-5px;width:14px;height:14px;cursor:sw-resize}
 #W.fs .rh{display:none}
+#SNFI{-webkit-user-select:text!important;user-select:text!important;}
 :root{--ui-s:1}
 #ZL{font-size:calc(11px * var(--ui-s));min-width:calc(38px * var(--ui-s))}
 /* Persistent faint L-brackets in each corner */
@@ -81,7 +82,15 @@ iframe{width:100%;height:100%;border:none;display:block}
       <button id="XB"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
   </div>
-  <div id="C"><div id="OL"></div><iframe id="snpd-frame" src="/proxy"></iframe></div>
+  <div id="C"><div id="OL"></div>
+    <div id="SNFB" style="display:none;position:absolute;bottom:8px;left:16px;z-index:500;background:#1f2937;border:1px solid #374151;border-radius:6px;padding:6px 10px;align-items:center;gap:6px;box-shadow:0 4px 12px #0008;">
+      <input id="SNFI" type="text" placeholder="Find..." style="background:#111827;border:1px solid #374151;border-radius:4px;padding:4px 8px;color:#e5e7eb;font-family:Consolas,monospace;font-size:calc(12px * var(--ui-s));outline:none;width:calc(200px * var(--ui-s));">
+      <button class="btn" id="SNFP" title="Previous" style="padding:2px 6px;">&#9650;</button>
+      <button class="btn" id="SNFN" title="Next" style="padding:2px 6px;">&#9660;</button>
+      <button class="btn" id="SNFX" title="Close" style="padding:2px 6px;">&#10005;</button>
+    </div>
+    <iframe id="snpd-frame" src="/proxy"></iframe>
+  </div>
 </div>
 )SHELL";
     // Seed localStorage from values saved to INI so applyZoom()/applyFs() see
@@ -403,6 +412,87 @@ iframe{width:100%;height:100%;border:none;display:block}
   BB.addEventListener('click',function(e){e.stopPropagation();if(navIdx>0){navIdx--;try{snpdFr.contentWindow.location.href=navHist[navIdx];}catch(_){snpdFr.src=navHist[navIdx];}updNav();}});
   FWB.addEventListener('mousedown',function(e){e.stopPropagation();});
   FWB.addEventListener('click',function(e){e.stopPropagation();if(navIdx<navHist.length-1){navIdx++;try{snpdFr.contentWindow.location.href=navHist[navIdx];}catch(_){snpdFr.src=navHist[navIdx];}updNav();}});
+
+  // ── Find bar (Ctrl+F) ──────────────────────────────────────────────────────
+  var _snfb=document.getElementById('SNFB'),_snfi=document.getElementById('SNFI');
+  var _snfp=document.getElementById('SNFP'),_snfn=document.getElementById('SNFN'),_snfx=document.getElementById('SNFX');
+  var _findOpen=false;
+  function snpdShowFind(){
+    _snfb.style.display='flex';_snfi.value='';_snfi.focus();_findOpen=true;
+    try{window.snpdFindState('1');}catch(_){}
+    try{FR.contentWindow.getSelection().removeAllRanges();}catch(_){}
+  }
+  function snpdHideFind(){
+    _snfb.style.display='none';_findOpen=false;window._snpdFindFocused=false;
+    try{window.snpdFindState('0');}catch(_){}
+    try{FR.contentWindow.getSelection().removeAllRanges();}catch(_){}
+    try{FR.contentWindow.focus();}catch(_){}
+  }
+  window.snpdToggleFind=function(){
+    // If a CM6 editor is focused inside the iframe, let CM6 handle Ctrl+F
+    if(!_findOpen){try{
+      var ae=FR.contentWindow.document.activeElement;
+      if(ae&&ae.closest&&ae.closest('.cm-editor'))return;
+    }catch(_){}}
+    if(_findOpen)snpdHideFind();else snpdShowFind();};
+  function snpdDoFind(backwards){
+    var q=_snfi.value;if(!q)return;
+    try{FR.contentWindow.find(q,false,backwards,true,false,false,false);}catch(_){}
+  }
+  _snfi.addEventListener('keydown',function(e){
+    if(e.key==='Enter'){e.preventDefault();snpdDoFind(e.shiftKey);}
+    else if(e.key==='Escape'){e.preventDefault();snpdHideFind();}
+  });
+  _snfi.addEventListener('input',function(){var q=_snfi.value;if(q)snpdDoFind(false);});
+  _snfp.addEventListener('click',function(e){e.stopPropagation();snpdDoFind(true);});
+  _snfn.addEventListener('click',function(e){e.stopPropagation();snpdDoFind(false);});
+  _snfx.addEventListener('click',function(e){e.stopPropagation();snpdHideFind();});
+  _snfi.addEventListener('mousedown',function(e){e.stopPropagation();});
+  _snfi.addEventListener('focus',function(){window._snpdFindFocused=true;});
+  _snfi.addEventListener('blur',function(){window._snpdFindFocused=false;});
+  _snfi.addEventListener('copy',function(e){e.preventDefault();},true);
+  _snfi.addEventListener('cut',function(e){e.preventDefault();},true);
+  // Block Ultralight's native clipboard — our C++ monitor handles it
+  _snfi.addEventListener('keydown',function(e){
+    if(e.ctrlKey&&(e.key==='c'||e.key==='C'||e.key==='x'||e.key==='X')){
+      e.preventDefault();e.stopPropagation();}
+    if(e.ctrlKey&&(e.key==='a'||e.key==='A')){e.preventDefault();_snfi.setSelectionRange(0,_snfi.value.length);}
+  },true);
+  // Manual drag selection — Ultralight suppresses mousemove during button hold
+  (function(){
+    var anchor=-1,cachedFont='',cachedRect=null,cachedPad=0,cachedWidths=null;
+    var ctx=document.createElement('canvas').getContext('2d');
+    function buildWidths(){
+      var f=getComputedStyle(_snfi).font;
+      if(f!==cachedFont||!cachedWidths){cachedFont=f;ctx.font=f;}
+      cachedRect=_snfi.getBoundingClientRect();
+      cachedPad=parseFloat(getComputedStyle(_snfi).paddingLeft)||0;
+      var txt=_snfi.value;
+      cachedWidths=new Array(txt.length+1);
+      for(var i=0;i<=txt.length;i++)cachedWidths[i]=ctx.measureText(txt.substring(0,i)).width;
+    }
+    function charPosAt(x){
+      var rel=x-cachedRect.left-cachedPad+_snfi.scrollLeft;
+      // Binary search
+      var lo=0,hi=cachedWidths.length-1;
+      while(lo<hi){var mid=(lo+hi)>>1;if(cachedWidths[mid]<rel)lo=mid+1;else hi=mid;}
+      return lo;
+    }
+    _snfi.addEventListener('pointerdown',function(e){
+      buildWidths();
+      anchor=charPosAt(e.clientX);
+    });
+    function endDrag(){anchor=-1;cachedWidths=null;}
+    document.addEventListener('pointerup',endDrag);
+    document.addEventListener('pointercancel',endDrag);
+    _snfi.addEventListener('blur',endDrag);
+    document.addEventListener('pointermove',function(e){
+      if(anchor<0||document.activeElement!==_snfi)return;
+      var pos=charPosAt(e.clientX);
+      var s=Math.min(anchor,pos),end=Math.max(anchor,pos);
+      _snfi.setSelectionRange(s,end,pos<anchor?'backward':'forward');
+    });
+  })();
 
   // ── Resize handles ─────────────────────────────────────────────────────────
   var rDir=null,rSX=0,rSY=0,rRect=null;

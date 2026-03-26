@@ -70,6 +70,7 @@ static constexpr const char* JS_GO_HOME =
 // IAT entries so GAKS returns 0 while the dashboard is focused.  PrismaUI and
 // Ultralight modules are excluded so dashboard input is unaffected.
 static std::atomic<bool> s_inputBlocked{false};
+static std::atomic<bool> s_findBarOpen{false};
 
 using GAKS_t = SHORT(WINAPI*)(int);
 static GAKS_t s_origGAKS = nullptr;
@@ -277,7 +278,10 @@ static void OnClose()
 // Called by the monitor thread when the Invoke result arrives with copied text.
 static void OnCopyResult(const char* result)
 {
-    if (result && *result) SetClipboardTextW32(result);
+    if (result && *result) {
+        std::string text(result);
+        std::thread([text]() { SetClipboardTextW32(text); }).detach();
+    }
 }
 
 // Produces a JS double-quoted string literal from arbitrary UTF-8 text.
@@ -307,7 +311,7 @@ static std::string EscapeJsStr(const std::string& s)
 static void StartClipboardMonitor()
 {
     std::thread([]() {
-        bool prevC = false, prevV = false, prevX = false;
+        bool prevC = false, prevV = false, prevX = false, prevF = false;
         for (;;) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             if (!s_PrismaUI || !s_View) { prevC = prevV = prevX = false; continue; }
@@ -335,39 +339,62 @@ static void StartClipboardMonitor()
             bool curC  = (GAKS('C') & 0x8000) != 0;
             bool curV  = (GAKS('V') & 0x8000) != 0;
             bool curX  = (GAKS('X') & 0x8000) != 0;
+            bool curF  = (GAKS('F') & 0x8000) != 0;
             if (ctrl) {
-                if (curC && !prevC) {
-                    // Copy: invoke __snpdCopy in the iframe, write result to Win32 clipboard
-                    s_PrismaUI->Invoke(s_View,
-                        "(function(){"
-                        "var f=document.getElementById('snpd-frame');"
-                        "var cw=f&&f.contentWindow;"
-                        "return cw&&cw.__snpdCopy?cw.__snpdCopy():'';}) ()",
-                        OnCopyResult);
-                }
-                if (curX && !prevX) {
-                    // Cut: __snpdCut deletes the selection and returns the text
-                    s_PrismaUI->Invoke(s_View,
-                        "(function(){"
-                        "var f=document.getElementById('snpd-frame');"
-                        "var cw=f&&f.contentWindow;"
-                        "return cw&&cw.__snpdCut?cw.__snpdCut():'';}) ()",
-                        OnCopyResult);
-                }
-                if (curV && !prevV) {
-                    // Paste: read Win32 clipboard and inject via __snpdPaste in the iframe
-                    std::string txt = GetClipboardTextW32();
-                    if (!txt.empty()) {
-                        std::string script =
+                // Skip iframe clipboard ops when find bar is focused — let native input handle it
+                static const char* FIND_GUARD = "(document.activeElement&&document.activeElement.id==='SNFI')";
+                if (s_findBarOpen.load()) {
+                    // Find bar: copy/cut write to Win32 clipboard, paste handled natively
+                    if (curC && !prevC) {
+                        s_PrismaUI->Invoke(s_View,
+                            "(function(){var el=document.getElementById('SNFI');"
+                            "if(!el)return '';return el.value.substring(el.selectionStart,el.selectionEnd);})()",
+                            OnCopyResult);
+                    }
+                    if (curX && !prevX) {
+                        s_PrismaUI->Invoke(s_View,
+                            "(function(){var el=document.getElementById('SNFI');"
+                            "if(!el)return '';var t=el.value.substring(el.selectionStart,el.selectionEnd);"
+                            "var s=el.selectionStart;el.value=el.value.substring(0,s)+el.value.substring(el.selectionEnd);"
+                            "el.setSelectionRange(s,s);return t;})()",
+                            OnCopyResult);
+                    }
+                    // Ctrl+V: native paste reads from Win32 clipboard — no Invoke needed
+                } else {
+                    // Iframe clipboard
+                    if (curC && !prevC) {
+                        s_PrismaUI->Invoke(s_View,
                             "(function(){"
                             "var f=document.getElementById('snpd-frame');"
                             "var cw=f&&f.contentWindow;"
-                            "if(cw&&cw.__snpdPaste)cw.__snpdPaste(" + EscapeJsStr(txt) + ");}) ()";
-                        s_PrismaUI->Invoke(s_View, script.c_str(), nullptr);
+                            "return cw&&cw.__snpdCopy?cw.__snpdCopy():'';}) ()",
+                            OnCopyResult);
+                    }
+                    if (curX && !prevX) {
+                        s_PrismaUI->Invoke(s_View,
+                            "(function(){"
+                            "var f=document.getElementById('snpd-frame');"
+                            "var cw=f&&f.contentWindow;"
+                            "return cw&&cw.__snpdCut?cw.__snpdCut():'';}) ()",
+                            OnCopyResult);
+                    }
+                    if (curV && !prevV) {
+                        std::string txt = GetClipboardTextW32();
+                        if (!txt.empty()) {
+                            std::string script =
+                                "(function(){"
+                                "var f=document.getElementById('snpd-frame');"
+                                "var cw=f&&f.contentWindow;"
+                                "if(cw&&cw.__snpdPaste)cw.__snpdPaste(" + EscapeJsStr(txt) + ");}) ()";
+                            s_PrismaUI->Invoke(s_View, script.c_str(), nullptr);
+                        }
                     }
                 }
+                if (curF && !prevF) {
+                    s_PrismaUI->Invoke(s_View, "(function(){if(typeof window.snpdToggleFind==='function')window.snpdToggleFind();})()");
+                }
             }
-            prevC = curC; prevV = curV; prevX = curX;
+            prevC = curC; prevV = curV; prevX = curX; prevF = curF;
         }
     }).detach();
 }
@@ -485,6 +512,30 @@ static void MessageHandler(SKSE::MessagingInterface::Message* a_message)
 
     // Close button in the HTML calls window.closeDashboard('') — wire it to OnToggle
     s_PrismaUI->RegisterJSListener(s_View, "closeDashboard", [](const char*) { OnToggle(); });
+    // Find bar state sync from JS
+    s_PrismaUI->RegisterJSListener(s_View, "snpdFindState", [](const char* val) {
+        bool open = val && val[0] == '1';
+        s_findBarOpen.store(open);
+    });
+    // Find bar clipboard — JS sends selected text, C++ writes to Win32 clipboard
+    s_PrismaUI->RegisterJSListener(s_View, "snpdFindClip", [](const char* text) {
+        if (text && text[0]) {
+            std::string t(text);
+            std::thread([t]() { SetClipboardTextW32(t); }).detach();
+        }
+    });
+    // Find bar paste — C++ reads Win32 clipboard, sends back via Invoke
+    s_PrismaUI->RegisterJSListener(s_View, "snpdFindPaste", [](const char*) {
+        std::string txt = GetClipboardTextW32();
+        if (!txt.empty()) {
+            std::string script =
+                "(function(){var el=document.getElementById('SNFI');if(!el)return;"
+                "var s=el.selectionStart;"
+                "el.value=el.value.substring(0,s)+" + EscapeJsStr(txt) + "+el.value.substring(el.selectionEnd);"
+                "el.setSelectionRange(s+" + std::to_string(txt.size()) + ",s+" + std::to_string(txt.size()) + ");})()";
+            s_PrismaUI->Invoke(s_View, script.c_str());
+        }
+    });
 
     logger::info("SkyrimNetDashboard: Shell view created at {} (iframe -> {})", shellUrl, s_cfg.url);
 
