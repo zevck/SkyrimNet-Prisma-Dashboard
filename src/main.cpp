@@ -394,6 +394,36 @@ static void StartClipboardMonitor()
                     s_PrismaUI->Invoke(s_View, "(function(){if(typeof window.snpdToggleFind==='function')window.snpdToggleFind();})()");
                 }
             }
+            // Alt+Left/Right for navigation, F5 for refresh
+            bool alt  = (GAKS(VK_MENU) & 0x8000) != 0;
+            bool curLeft  = (GAKS(VK_LEFT) & 0x8000) != 0;
+            bool curRight = (GAKS(VK_RIGHT) & 0x8000) != 0;
+            bool curF5    = (GAKS(VK_F5) & 0x8000) != 0;
+            static bool prevLeft = false, prevRight = false, prevF5 = false;
+            if (alt) {
+                if (curLeft && !prevLeft)
+                    s_PrismaUI->Invoke(s_View, "(function(){if(typeof BB!=='undefined')BB.click();})()");
+                if (curRight && !prevRight)
+                    s_PrismaUI->Invoke(s_View, "(function(){if(typeof FWB!=='undefined')FWB.click();})()");
+            }
+            if (curF5 && !prevF5)
+                s_PrismaUI->Invoke(s_View, "(function(){var f=document.getElementById('snpd-frame');if(f&&f.contentWindow)f.contentWindow.location.reload();})()");
+            bool curHome = (GAKS(VK_HOME) & 0x8000) != 0;
+            bool curEnd  = (GAKS(VK_END) & 0x8000) != 0;
+            static bool prevHome = false, prevEnd = false;
+            if ((curHome && !prevHome) || (curEnd && !prevEnd)) {
+                // Skip when a text input or editor is focused
+                std::string dir = (curHome && !prevHome) ? "0" : "f.contentWindow.document.body.scrollHeight";
+                std::string script =
+                    "(function(){var f=document.getElementById('snpd-frame');if(!f||!f.contentWindow)return;"
+                    "var ae=f.contentWindow.document.activeElement;"
+                    "if(ae&&(ae.tagName==='INPUT'||ae.tagName==='TEXTAREA'||ae.isContentEditable||"
+                    "(ae.closest&&ae.closest('.cm-editor'))))return;"
+                    "f.contentWindow.scrollTo(0," + dir + ");})()";
+                s_PrismaUI->Invoke(s_View, script.c_str());
+            }
+            prevHome = curHome; prevEnd = curEnd;
+            prevLeft = curLeft; prevRight = curRight; prevF5 = curF5;
             prevC = curC; prevV = curV; prevX = curX; prevF = curF;
         }
     }).detach();

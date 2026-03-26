@@ -29,9 +29,13 @@ static bool ResolveHost(const std::string& host, sockaddr_in& addr)
     }
     addr.sin_addr.s_addr = *reinterpret_cast<u_long*>(he->h_addr_list[0]);
     {
-        auto ip = addr.sin_addr.s_addr;
-        logger::info("SkyrimNetDashboard: resolved '{}' -> {}.{}.{}.{}",
-                     host, ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+        static bool s_loggedResolve = false;
+        if (!s_loggedResolve) {
+            auto ip = addr.sin_addr.s_addr;
+            logger::info("SkyrimNetDashboard: resolved '{}' -> {}.{}.{}.{}",
+                         host, ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+            s_loggedResolve = true;
+        }
     }
     return true;
 }
