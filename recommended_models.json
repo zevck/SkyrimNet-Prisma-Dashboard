@@ -1,52 +1,52 @@
 {
   "openrouter": {
     "dialogue": [
-      "anthropic/claude-sonnet-4.6",
-      "deepseek/deepseek-v3.2",
-      "qwen/qwen3-235b-a22b-2507",
-      "z-ai/glm-4.7"
+      { "id": "anthropic/claude-sonnet-4.6", "temp": 0.7 },
+      { "id": "deepseek/deepseek-v3.2", "temp": 0.7 },
+      { "id": "qwen/qwen3-235b-a22b-2507", "temp": 0.7 },
+      { "id": "z-ai/glm-4.7", "temp": 0.7 }
     ],
     "meta": [
-      "x-ai/grok-4.1-fast",
-      "google/gemini-2.5-flash"
+      { "id": "x-ai/grok-4.1-fast", "temp": 0.7 },
+      { "id": "google/gemini-2.5-flash", "temp": 0.7 }
     ],
     "combat": [
-      "x-ai/grok-4.1-fast",
-      "deepseek/deepseek-v3.2",
-      "qwen/qwen3-235b-a22b-2507"
+      { "id": "x-ai/grok-4.1-fast", "temp": 0.8 },
+      { "id": "deepseek/deepseek-v3.2", "temp": 0.8 },
+      { "id": "qwen/qwen3-235b-a22b-2507", "temp": 0.8 }
     ],
     "action_eval": [
-      "x-ai/grok-4.1-fast",
-      "deepseek/deepseek-v3.2"
+      { "id": "x-ai/grok-4.1-fast", "temp": 0.7 },
+      { "id": "deepseek/deepseek-v3.2", "temp": 0.7 }
     ],
     "gamemaster": [
-      "x-ai/grok-4.1-fast",
-      "deepseek/deepseek-v3.2"
+      { "id": "x-ai/grok-4.1-fast", "temp": 0.7 },
+      { "id": "deepseek/deepseek-v3.2", "temp": 0.7 }
     ],
     "helper_agent": [
-      "anthropic/claude-haiku-4.5"
+      { "id": "anthropic/claude-haiku-4.5", "temp": 0.7 }
     ],
     "character_profile": [
-      "anthropic/claude-sonnet-4.6",
-      "deepseek/deepseek-v3.2",
-      "qwen/qwen3-235b-a22b-2507",
-      "z-ai/glm-4.7"
+      { "id": "anthropic/claude-sonnet-4.6", "temp": 0.7 },
+      { "id": "deepseek/deepseek-v3.2", "temp": 0.7 },
+      { "id": "qwen/qwen3-235b-a22b-2507", "temp": 0.7 },
+      { "id": "z-ai/glm-4.7", "temp": 0.7 }
     ],
     "diary": [
-      "anthropic/claude-sonnet-4.6",
-      "deepseek/deepseek-v3.2",
-      "qwen/qwen3-235b-a22b-2507",
-      "z-ai/glm-4.7"
+      { "id": "anthropic/claude-sonnet-4.6", "temp": 0.7 },
+      { "id": "deepseek/deepseek-v3.2", "temp": 0.7 },
+      { "id": "qwen/qwen3-235b-a22b-2507", "temp": 0.7 },
+      { "id": "z-ai/glm-4.7", "temp": 0.7 }
     ],
     "memory": [
-      "deepseek/deepseek-v3.2"
+      { "id": "deepseek/deepseek-v3.2", "temp": 0.7 }
     ],
     "vision": [
-      "qwen/qwen3-vl-235b-a22b-instruct"
+      { "id": "qwen/qwen3-vl-235b-a22b-instruct", "temp": 0.7 }
     ],
     "translator": [
-      "google/gemini-2.5-flash",
-      "x-ai/grok-4.1-fast"
+      { "id": "google/gemini-2.5-flash", "temp": 0.7 },
+      { "id": "x-ai/grok-4.1-fast", "temp": 0.7 }
     ]
   },
   "nvidia": {
