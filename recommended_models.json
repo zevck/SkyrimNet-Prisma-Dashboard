@@ -1,51 +1,58 @@
 {
-  "dialogue": [
-    "anthropic/claude-sonnet-4.6",
-    "deepseek/deepseek-v3.2",
-    "qwen/qwen3-235b-a22b-2507",
-    "z-ai/glm-4.7"
-  ],
-  "meta": [
-    "x-ai/grok-4.1-fast",
-    "google/gemini-2.5-flash",
-    "deepseek/deepseek-v3.2"
-  ],
-  "combat": [
-    "x-ai/grok-4.1-fast",
-    "deepseek/deepseek-v3.2",
-    "qwen/qwen3-235b-a22b-2507"
-  ],
-  "action_eval": [
-    "x-ai/grok-4.1-fast",
-    "google/gemini-2.5-flash"
-  ],
-  "gamemaster": [
-    "google/gemini-2.5-flash",
-    "x-ai/grok-4.1-fast",
-    "deepseek/deepseek-v3.2"
-  ],
-  "helper_agent": [
-    "anthropic/claude-sonnet-4.6",
-    "deepseek/deepseek-v3.2"
-  ],
-  "character_profile": [
-    "anthropic/claude-sonnet-4.6",
-    "deepseek/deepseek-v3.2"
-  ],
-  "diary": [
-    "anthropic/claude-sonnet-4.6",
-    "deepseek/deepseek-v3.2"
-  ],
-  "memory": [
-    "deepseek/deepseek-v3.2",
-    "google/gemini-2.5-flash"
-  ],
-  "vision": [
-    "qwen/qwen3-235b-a22b-2507",
-    "google/gemini-2.5-flash"
-  ],
-  "translator": [
-    "google/gemini-2.5-flash",
-    "deepseek/deepseek-v3.2"
-  ]
+  "openrouter": {
+    "dialogue": [
+      "anthropic/claude-sonnet-4.6",
+      "deepseek/deepseek-v3.2",
+      "qwen/qwen3-235b-a22b-2507",
+      "z-ai/glm-4.7"
+    ],
+    "meta": [
+      "x-ai/grok-4.1-fast",
+      "google/gemini-2.5-flash",
+    ],
+    "combat": [
+      "x-ai/grok-4.1-fast",
+      "deepseek/deepseek-v3.2",
+      "qwen/qwen3-235b-a22b-2507"
+    ],
+    "action_eval": [
+      "x-ai/grok-4.1-fast",
+      "deepseek/deepseek-v3.2"
+    ],
+    "gamemaster": [
+      "x-ai/grok-4.1-fast",
+      "deepseek/deepseek-v3.2"
+    ],
+    "helper_agent": [
+      "anthropic/claude-haiku-4.5",
+    ],
+    "character_profile": [
+      "anthropic/claude-sonnet-4.6",
+      "deepseek/deepseek-v3.2",
+      "qwen/qwen3-235b-a22b-2507",
+      "z-ai/glm-4.7"
+    ],
+    "diary": [
+      "anthropic/claude-sonnet-4.6",
+      "deepseek/deepseek-v3.2",
+      "qwen/qwen3-235b-a22b-2507",
+      "z-ai/glm-4.7"
+    ],
+    "memory": [
+      "deepseek/deepseek-v3.2"
+    ],
+    "vision": [
+      "qwen/qwen3-vl-235b-a22b-instruct"
+    ],
+    "translator": [
+      "google/gemini-2.5-flash",
+      "x-ai/grok-4.1-fast"
+    ]
+  },
+  "nvidia": {
+  },
+  "nanogpt": {
+  },
+  "chutes": {
+  }
 }
