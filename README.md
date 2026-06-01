@@ -1,5 +1,5 @@
 # SkyrimNet Prisma Dashboard
-This mod will soon be deprecated. As of SkyrimNet Beta 21, you can continue using it to access the old web ui by changing the port in SkyrimNetPrismaDashboard.ini to 8081.
+This mod will soon be deprecated. As of SkyrimNet Beta 21, you can continue using it to access the old web ui by changing the port in `SkyrimNetPrismaDashboard.ini` to 8081.
 
 ```ini
 [Dashboard]
