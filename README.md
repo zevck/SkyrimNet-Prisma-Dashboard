@@ -1,4 +1,15 @@
 # SkyrimNet Prisma Dashboard
+This mod will soon be deprecated. As of Beta 21, you can continue using it to access the old web ui by changing the port in SkyrimNetPrismaDashboard.inito 8081.
+
+```ini
+[Dashboard]
+; Full URL to your SkyrimNet instance, including port.
+; Default http://localhost:8080/ works for most setups.
+; If it doesn't, replace with your local IP, e.g. http://192.168.1.100:8080/
+URL=http://localhost:8081/
+```
+
+The new dashboard is available in-game natively and this mod is **not required.** 
 
 Brings the SkyrimNet web dashboard directly into Skyrim, no alt-tabbing required.
 
